@@ -2,97 +2,228 @@ import { useState, useEffect, useRef } from "react";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
 
-const PHASES = [
+// Task configuration is deliberately simple and declarative so an admin can
+// customize tomorrow's flow just by editing this array.
+//
+// Concepts:
+// - Stage         → High level bucket ("Hypothesis", "Outreach", etc.)
+// - Task Group    → A unit of work with its own deadline window in days
+// - Todo / Group  → Leaf todo item or a nested todo group (tree structure)
+//   - When `isGroup` is true, `children` contains its sub‑todos/groups.
+//   - Todo groups themselves do NOT have timers — only leaf todos do.
+//
+// Day ranges are relative to the existing `startDate` logic (Day 1..7).
+
+const TASK_STAGES = [
   {
-    id: "hypothesis",
-    label: "HYPOTHESIS",
-    shortLabel: "HYP",
-    days: [1, 2],
+    id: "hypothesis-stage",
+    label: "Hypothesis",
     color: "#E8C547",
     dim: "#1a1500",
-    tagline: "Lock your bet before you touch the market.",
-    rule: "No outreach until hypothesis is written and frozen.",
+    startDay: 1,
+    endDay: 1,
+    taskGroups: [
+      {
+        id: "hypothesis-1",
+        title: "Lock your hypothesis",
+        // Must be completed on Day 1
+        startDay: 1,
+        endDay: 1,
+        todos: [
+          {
+            id: "hypo-who",
+            label: "Define WHO — industry + role + location in one sentence",
+            isGroup: false,
+            minutes: 20,
+          },
+          {
+            id: "hypo-pain",
+            label: "Define PAIN — what frustrates them every single day?",
+            isGroup: false,
+            minutes: 20,
+          },
+          {
+            id: "hypo-outcome",
+            label: "Define OUTCOME — what is measurably different after 7 days?",
+            isGroup: false,
+            minutes: 20,
+          },
+          {
+            id: "hypo-price-group",
+            label: "Price + final hypothesis statement",
+            isGroup: true,
+            children: [
+              {
+                id: "hypo-price",
+                label: "Set PRICE — commit to one number, no ranges",
+                isGroup: false,
+                minutes: 10,
+              },
+              {
+                id: "hypo-statement",
+                label: "Write the full hypothesis statement and freeze it",
+                isGroup: false,
+                minutes: 15,
+              },
+            ],
+          },
+        ],
+      },
+    ],
   },
   {
-    id: "experiment",
-    label: "EXPERIMENT",
-    shortLabel: "EXP",
-    days: [3, 4, 5],
+    id: "prereq-stage",
+    label: "Getting Prerequisites ready",
     color: "#5B9CF6",
     dim: "#0d1a30",
-    tagline: "Send volume. Collect signal. Touch nothing.",
-    rule: "10+ attempts per day. Do NOT change your message mid-week.",
+    // Spans Day 1–2
+    startDay: 1,
+    endDay: 2,
+    taskGroups: [
+      {
+        id: "prereq-1",
+        title: "Get infrastructure ready",
+        startDay: 1,
+        endDay: 2,
+        todos: [
+          {
+            id: "prereq-offer-doc",
+            label: "Build one-page offer doc",
+            isGroup: false,
+            minutes: 25,
+          },
+          {
+            id: "prereq-links",
+            label: "Booking + payment + outreach system",
+            isGroup: true,
+            children: [
+              {
+                id: "prereq-booking",
+                label: "Set up booking link (Calendly or similar)",
+                isGroup: false,
+                minutes: 10,
+              },
+              {
+                id: "prereq-payment",
+                label: "Create payment link (Stripe or similar)",
+                isGroup: false,
+                minutes: 10,
+              },
+              {
+                id: "prereq-outreach-msg",
+                label: "Write outreach message for primary channel",
+                isGroup: false,
+                minutes: 20,
+              },
+            ],
+          },
+          {
+            id: "prereq-leads",
+            label: "Map 30+ leads",
+            isGroup: false,
+            minutes: 30,
+          },
+        ],
+      },
+    ],
   },
   {
-    id: "feedback",
-    label: "FEEDBACK",
-    shortLabel: "FDB",
-    days: [6],
+    id: "outreach-stage",
+    label: "Outreach",
     color: "#52D68A",
     dim: "#0a1f14",
-    tagline: "Read the data. Name the leak. Don't react yet.",
-    rule: "Observe only. All changes happen on Day 7.",
+    // Outreach spans Days 2–6; we assign a task group on each day.
+    startDay: 2,
+    endDay: 6,
+    taskGroups: [
+      {
+        id: "outreach-2",
+        title: "Outreach Day 2",
+        startDay: 2,
+        endDay: 2,
+        todos: [
+          { id: "outreach-2-send", label: "Send 10 outreach attempts", isGroup: false, minutes: 40 },
+          {
+            id: "outreach-2-followup",
+            label: "Follow up on warm leads",
+            isGroup: true,
+            children: [
+              { id: "outreach-2-log", label: "Log today's numbers", isGroup: false, minutes: 10 },
+              { id: "outreach-2-replies", label: "Reply to any inbound within the hour", isGroup: false, minutes: 10 },
+            ],
+          },
+        ],
+      },
+      {
+        id: "outreach-3",
+        title: "Outreach Day 3",
+        startDay: 3,
+        endDay: 3,
+        todos: [
+          { id: "outreach-3-send", label: "Send 10 outreach attempts", isGroup: false, minutes: 40 },
+          { id: "outreach-3-log", label: "Log today's numbers", isGroup: false, minutes: 10 },
+        ],
+      },
+      {
+        id: "outreach-4",
+        title: "Outreach Day 4",
+        startDay: 4,
+        endDay: 4,
+        todos: [
+          { id: "outreach-4-send", label: "Send 10 outreach attempts", isGroup: false, minutes: 40 },
+          { id: "outreach-4-log", label: "Log today's numbers", isGroup: false, minutes: 10 },
+        ],
+      },
+      {
+        id: "outreach-5",
+        title: "Outreach Day 5",
+        startDay: 5,
+        endDay: 5,
+        todos: [
+          { id: "outreach-5-send", label: "Send 10 outreach attempts", isGroup: false, minutes: 40 },
+          { id: "outreach-5-log", label: "Log today's numbers", isGroup: false, minutes: 10 },
+        ],
+      },
+      {
+        id: "outreach-6",
+        title: "Outreach Day 6",
+        startDay: 6,
+        endDay: 6,
+        todos: [
+          { id: "outreach-6-review", label: "Review responses and classify replies", isGroup: false, minutes: 30 },
+          { id: "outreach-6-leak", label: "Write one leak sentence from the week so far", isGroup: false, minutes: 15 },
+        ],
+      },
+    ],
   },
   {
-    id: "decision",
-    label: "DECISION",
-    shortLabel: "DEC",
-    days: [7],
+    id: "decision-stage",
+    label: "Make Decision",
     color: "#F06449",
     dim: "#200e0a",
-    tagline: "Scale, pivot, or kill. One fix maximum.",
-    rule: "Change exactly ONE variable. Lock Week 2 hypothesis.",
+    startDay: 7,
+    endDay: 7,
+    taskGroups: [
+      {
+        id: "decision-1",
+        title: "Decision Day",
+        startDay: 7,
+        endDay: 7,
+        todos: [
+          {
+            id: "decision-verdict-group",
+            label: "Pick your verdict and write Week 2 hypothesis",
+            isGroup: true,
+            children: [
+              { id: "decision-verdict", label: "Choose verdict: SCALE / PIVOT / KILL", isGroup: false, minutes: 10 },
+              { id: "decision-w2", label: "Write the Week 2 locked hypothesis", isGroup: false, minutes: 20 },
+            ],
+          },
+        ],
+      },
+    ],
   },
 ];
-
-const TODOS = {
-  1: [
-    { id: "1a", text: "Define WHO — industry + role + location in one sentence" },
-    { id: "1b", text: "Define PAIN — what frustrates them every single day?" },
-    { id: "1c", text: "Define OUTCOME — what is measurably different after 7 days?" },
-    { id: "1d", text: "Set PRICE — commit to one number, no ranges" },
-    { id: "1e", text: "Write the full hypothesis statement and freeze it (see Hypothesis tab)" },
-  ],
-  2: [
-    { id: "2a", text: "Build one-page offer doc (Notion or Google Doc — one single link)" },
-    { id: "2b", text: "Set up booking link (Calendly or GHL calendar)" },
-    { id: "2c", text: "Create payment link (Stripe)" },
-    { id: "2d", text: "Write outreach message — Tier A (video first) or Tier B (permission first)" },
-    { id: "2e", text: "Map 30+ leads — warm contacts first, local second, cold last" },
-  ],
-  3: [
-    { id: "3a", text: "Send 10 outreach attempts (warm/local preferred)" },
-    { id: "3b", text: "Log today's numbers in the scoreboard" },
-    { id: "3c", text: "Reply to any inbound within the hour" },
-    { id: "3d", text: "Do NOT change your message or niche today" },
-  ],
-  4: [
-    { id: "4a", text: "Send 10 outreach attempts (expand to cold if warm exhausted)" },
-    { id: "4b", text: "Log today's numbers in the scoreboard" },
-    { id: "4c", text: "Handle replies same-day — send calendar link on first interest signal" },
-    { id: "4d", text: "If a call happens — run 5-phase skeleton: Frame → Diagnose → Outcome → Plan → Decision" },
-  ],
-  5: [
-    { id: "5a", text: "Send 10 outreach attempts" },
-    { id: "5b", text: "Log today's numbers in the scoreboard" },
-    { id: "5c", text: "Handle all replies — zero inbox debt by end of day" },
-    { id: "5d", text: "Note the most common objection or non-response pattern" },
-  ],
-  6: [
-    { id: "6a", text: "Pull totals: attempts / pos. replies / shows / closes / revenue" },
-    { id: "6b", text: "Identify your primary leak (Volume? Message? CTA? Call structure?)" },
-    { id: "6c", text: "Classify all replies: Interested / Not Now / Not a Fit" },
-    { id: "6d", text: "Write the sentence: 'The market told me ___' (see Decision tab)" },
-    { id: "6e", text: "Do NOT make any changes yet — observation only today" },
-  ],
-  7: [
-    { id: "7a", text: "Choose verdict: SCALE / PIVOT / KILL (see Decision tab)" },
-    { id: "7b", text: "If PIVOT — name the single variable you are changing" },
-    { id: "7c", text: "Write the Week 2 locked hypothesis" },
-    { id: "7d", text: "Schedule Week 2 daily outreach blocks now — calendar block, not intent" },
-    { id: "7e", text: "Submit scoreboard + 1-line leak summary + 1 fix to accountability group" },
-  ],
-};
 
 const METRIC_FIELDS = [
   { key: "attempts", label: "Attempts", currency: false },
@@ -102,12 +233,6 @@ const METRIC_FIELDS = [
   { key: "revenue", label: "Revenue", currency: true },
 ];
 
-function phaseOf(day) {
-  return PHASES.find(p => p.days.includes(day)) || PHASES[0];
-}
-function phaseIdxOf(day) {
-  return PHASES.findIndex(p => p.days.includes(day));
-}
 function sumField(metricsObj, key) {
   return Object.values(metricsObj).reduce((s, v) => s + (parseFloat(v[key]) || 0), 0);
 }
@@ -150,24 +275,75 @@ export default function App() {
   const currentDay = Math.max(1, Math.min(7, Math.floor((todayAtMidnight.getTime() - startAtMidnight.getTime()) / (1000 * 60 * 60 * 24)) + 1));
   const st = { ...rawSt, day: currentDay };
 
-  const phase = phaseOf(st.day);
-  const phaseIdx = phaseIdxOf(st.day);
+  // ── task helpers
+  const flatTaskGroups = [];
+  TASK_STAGES.forEach((stage, sIdx) => {
+    stage.taskGroups.forEach((g, gIdx) => {
+      flatTaskGroups.push({ stageIdx: sIdx, groupIdx: gIdx, stage, group: g });
+    });
+  });
 
-  const dayDone = d => Object.values(st.checked[d] || {}).filter(Boolean).length;
-  const dayTotal = d => (TODOS[d] || []).length;
-  const dayPct = d => dayTotal(d) ? Math.round(dayDone(d) / dayTotal(d) * 100) : 0;
+  const activeIdx = Math.min(
+    flatTaskGroups.length - 1,
+    rawSt?.activeTaskIndex ?? 0
+  );
+  const activeEntry = flatTaskGroups[activeIdx] || flatTaskGroups[0];
+  const activeStage = activeEntry.stage;
+  const activeGroup = activeEntry.group;
 
-  const allDone = [1, 2, 3, 4, 5, 6, 7].reduce((s, d) => s + dayDone(d), 0);
-  const allTotal = [1, 2, 3, 4, 5, 6, 7].reduce((s, d) => s + dayTotal(d), 0);
-  const weekPct = Math.round(allDone / allTotal * 100);
+  const countTodos = (todos) => {
+    return todos.reduce((acc, t) => {
+      if (t.isGroup && t.children) {
+        return acc + countTodos(t.children);
+      }
+      return acc + 1;
+    }, 0);
+  };
+
+  const isTodoDone = (todo) => {
+    const key = `${todo.id}`;
+    return !!st.checkedTodos?.[key];
+  };
+
+  const groupDoneCount = (group) => {
+    let done = 0;
+    const walk = (todos) => {
+      todos.forEach(t => {
+        if (t.isGroup && t.children) {
+          walk(t.children);
+        } else if (isTodoDone(t)) {
+          done += 1;
+        }
+      });
+    };
+    walk(group.todos || []);
+    return done;
+  };
+
+  const groupTotalCount = (group) => countTodos(group.todos || []);
+  const groupPct = (group) => {
+    const total = groupTotalCount(group);
+    if (!total) return 0;
+    return Math.round(groupDoneCount(group) / total * 100);
+  };
+
+  const allDone = flatTaskGroups.reduce((sum, e) => sum + groupDoneCount(e.group), 0);
+  const allTotal = flatTaskGroups.reduce((sum, e) => sum + groupTotalCount(e.group), 0);
+  const weekPct = allTotal ? Math.round(allDone / allTotal * 100) : 0;
 
   const upd = patch => setSt(p => ({ ...p, ...patch }));
   const stStr = JSON.stringify(st); // stable reference for effect
 
-  const tog = (day, id) => setSt(p => ({
-    ...p,
-    checked: { ...p.checked, [day]: { ...(p.checked[day] || {}), [id]: !(p.checked[day]?.[id]) } }
-  }));
+  const togTodo = (todo) => {
+    const key = `${todo.id}`;
+    setSt(p => ({
+      ...p,
+      checkedTodos: {
+        ...(p.checkedTodos || {}),
+        [key]: !p.checkedTodos?.[key],
+      }
+    }));
+  };
 
   const setM = (day, key, val) => setSt(p => ({
     ...p,
@@ -188,7 +364,7 @@ export default function App() {
     { id: "vol", label: "VOLUME", color: "#F06449", active: totAtt < 30 && st.day >= 4, msg: "Sending < 10/day. Protect your outreach block." },
     { id: "msg", label: "MESSAGE", color: "#E8C547", active: totAtt >= 30 && parseFloat(repRate) < 1, msg: "Reply rate < 1%. Rewrite first 2 lines of your message." },
     { id: "fup", label: "FOLLOWUP", color: "#5B9CF6", active: totRep > 0 && totShow === 0, msg: "Replies exist but no calls booked. Send calendar link on first signal." },
-    { id: "call", label: "CALL", color: "#52D68A", active: totShow > 0 && totClose === 0, msg: "Calls happening but no close. Tighten the 5-phase skeleton." },
+    { id: "call", label: "CALL", color: "#52D68A", active: totShow > 0 && totClose === 0, msg: "Calls happening but no close. Tighten your call structure." },
   ];
   const hotLeaks = leaks.filter(l => l.active);
 
@@ -214,13 +390,168 @@ export default function App() {
 
   const tarea = { ...input, resize: "vertical", minHeight: 68 };
 
+  // timer bookkeeping for locked todos (minutes countdown)
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
   useEffect(() => {
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       try { localStorage.setItem(SK, JSON.stringify(st)); } catch { }
     }, 400);
   }, [stStr]);
+  // Helper component rendered inline for task trees with locking + timers
+  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0 }) {
+    return (
+      <div>
+        {todos.map(todo => {
+          const done = !todo.isGroup && isDone(todo);
+          const isGroup = todo.isGroup;
+          const key = todo.id;
+          const locked = !!st.lockedTodos?.[key];
+          const lockedAt = st.lockedTodos?.[key]?.lockedAt;
+          const minutes = todo.minutes || 0;
+          const deadlineMs = minutes * 60 * 1000;
+          const remainingMs = locked && lockedAt ? Math.max(0, lockedAt + deadlineMs - now) : null;
+          const remainingMin = remainingMs != null ? Math.floor(remainingMs / 60000) : null;
+          const remainingSec = remainingMs != null ? Math.floor((remainingMs % 60000) / 1000) : null;
 
+          const toggleLock = () => {
+            setSt(p => {
+              const existing = p.lockedTodos || {};
+              if (existing[key]) {
+                const copy = { ...existing };
+                delete copy[key];
+                return { ...p, lockedTodos: copy };
+              }
+              return {
+                ...p,
+                lockedTodos: {
+                  ...existing,
+                  [key]: { lockedAt: Date.now() },
+                },
+              };
+            });
+          };
+
+          return (
+            <div key={todo.id} style={{ marginLeft: depth * 14, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+                {!isGroup && (
+                  <button
+                    onClick={() => onToggle(todo)}
+                    style={{
+                      width: 17,
+                      height: 17,
+                      borderRadius: 3,
+                      flexShrink: 0,
+                      marginTop: 1,
+                      border: `1.5px solid ${done ? accentColor : "#2a2a2a"}`,
+                      background: done ? accentColor : "transparent",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      transition: "all .15s",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {done && (
+                      <svg width="9" height="7" viewBox="0 0 9 7" fill="none">
+                        <path d="M1 3.5L3.5 6 8 1" stroke="#080808" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                  </button>
+                )}
+
+                {isGroup && (
+                  <div
+                    style={{
+                      width: 17,
+                      height: 17,
+                      borderRadius: 3,
+                      flexShrink: 0,
+                      marginTop: 1,
+                      border: `1.5px solid #2a2a2a`,
+                      background: "#050505",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 10,
+                      color: "#444",
+                    }}
+                  >
+                    G
+                  </div>
+                )}
+
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                    <span
+                      style={{
+                        fontSize: 12,
+                        lineHeight: 1.55,
+                        color: done ? "#3a3a3a" : C.text,
+                        textDecoration: done ? "line-through" : "none",
+                        transition: "color .15s",
+                      }}
+                    >
+                      {todo.label}
+                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                      {minutes > 0 && !isGroup && (
+                        <span style={{ fontSize: 9, color: "#444" }}>{minutes}m</span>
+                      )}
+                      {!isGroup && (
+                        <button
+                          onClick={toggleLock}
+                          style={{
+                            fontSize: 9,
+                            letterSpacing: 1,
+                            padding: "3px 7px",
+                            borderRadius: 3,
+                            border: `1px solid ${locked ? accentColor : "#222"}`,
+                            background: locked ? accentColor : "transparent",
+                            color: locked ? "#080808" : "#555",
+                            textTransform: "uppercase",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {locked ? "Locked" : "Lock"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {locked && remainingMs != null && (
+                    <div style={{ marginTop: 4, fontSize: 10, color: remainingMs === 0 ? "#F06449" : accentColor }}>
+                      {remainingMs === 0 ? "Deadline passed" : `Time left: ${remainingMin}m ${remainingSec.toString().padStart(2, "0")}s`}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {isGroup && todo.children && todo.children.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <TaskList
+                    todos={todo.children}
+                    onToggle={onToggle}
+                    isDone={isDone}
+                    accentColor={accentColor}
+                    C={C}
+                    depth={depth + 1}
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div style={{ fontFamily: "'IBM Plex Mono','Fira Code','Courier New',monospace", minHeight: "100vh", background: C.bg, color: C.text, display: "flex", flexDirection: "column" }}>
@@ -240,7 +571,7 @@ export default function App() {
       <div style={{ height: 50, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "stretch", padding: "0 20px", flexShrink: 0 }}>
         {/* Brand */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, paddingRight: 20, borderRight: `1px solid ${C.border}`, marginRight: 4 }}>
-          <div style={{ width: 7, height: 7, borderRadius: "50%", background: phase.color, animation: "blink 2s infinite" }} />
+          <div style={{ width: 7, height: 7, borderRadius: "50%", background: activeStage.color, animation: "blink 2s infinite" }} />
           <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 3, color: C.textHi }}>SSQ</span>
           <span style={{ fontSize: 9, color: "#2a2a2a", letterSpacing: 1 }}>WEEK 1</span>
         </div>
@@ -272,9 +603,9 @@ export default function App() {
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ fontSize: 9, letterSpacing: 2, color: "#333" }}>WEEK</span>
             <div style={{ width: 72, height: 2, background: C.border, borderRadius: 1, overflow: "hidden" }}>
-              <div style={{ height: "100%", width: `${weekPct}%`, background: phase.color, transition: "width .4s" }} />
+              <div style={{ height: "100%", width: `${weekPct}%`, background: activeStage.color, transition: "width .4s" }} />
             </div>
-            <span style={{ fontSize: 10, fontWeight: 700, color: phase.color }}>{weekPct}%</span>
+            <span style={{ fontSize: 10, fontWeight: 700, color: activeStage.color }}>{weekPct}%</span>
           </div>
         </div>
       </div>
@@ -293,29 +624,31 @@ export default function App() {
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 5 }}>
                     <span style={{ fontSize: 34, fontWeight: 700, color: C.textHi, letterSpacing: -1, lineHeight: 1 }}>Day {st.day}</span>
                     <span style={{
-                      fontSize: 9, letterSpacing: 2, fontWeight: 700, color: phase.color,
-                      background: phase.dim, border: `1px solid ${phase.color}44`,
+                      fontSize: 9, letterSpacing: 2, fontWeight: 700, color: activeStage.color,
+                      background: activeStage.dim, border: `1px solid ${activeStage.color}44`,
                       padding: "3px 8px", borderRadius: 2
-                    }}>{phase.label}</span>
+                    }}>{activeStage.label}</span>
                   </div>
-                  <div style={{ fontSize: 12, color: phase.color, marginBottom: 4 }}>{phase.tagline}</div>
-                  <div style={{ fontSize: 10, color: "#444", letterSpacing: .5 }}>Rule: {phase.rule}</div>
+                  <div style={{ fontSize: 12, color: activeStage.color, marginBottom: 4 }}>{activeGroup.title}</div>
+                  <div style={{ fontSize: 10, color: "#444", letterSpacing: .5 }}>
+                    Task group window: Day {activeGroup.startDay}{activeGroup.endDay !== activeGroup.startDay ? `–${activeGroup.endDay}` : ""}
+                  </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ position: "relative", width: 48, height: 48, flexShrink: 0 }}>
                     <svg width={48} height={48} style={{ transform: "rotate(-90deg)" }}>
                       <circle cx={24} cy={24} r={20} fill="none" stroke="#181818" strokeWidth={3} />
-                      <circle cx={24} cy={24} r={20} fill="none" stroke={phase.color} strokeWidth={3}
-                        strokeDasharray={`${(dayPct(st.day) / 100) * (2 * Math.PI * 20)} ${2 * Math.PI * 20}`}
+                      <circle cx={24} cy={24} r={20} fill="none" stroke={activeStage.color} strokeWidth={3}
+                        strokeDasharray={`${(groupPct(activeGroup) / 100) * (2 * Math.PI * 20)} ${2 * Math.PI * 20}`}
                         strokeLinecap="round" style={{ transition: "stroke-dasharray .4s ease" }} />
                     </svg>
-                    <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: phase.color }}>
-                      {dayPct(st.day)}%
+                    <span style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: activeStage.color }}>
+                      {groupPct(activeGroup)}%
                     </span>
                   </div>
                   <div>
                     <div style={{ fontSize: 24, fontWeight: 700, color: C.textHi, lineHeight: 1 }}>
-                      {dayDone(st.day)}<span style={{ fontSize: 12, color: "#3a3a3a" }}>/{dayTotal(st.day)}</span>
+                      {groupDoneCount(activeGroup)}<span style={{ fontSize: 12, color: "#3a3a3a" }}>/{groupTotalCount(activeGroup)}</span>
                     </div>
                     <div style={{ fontSize: 10, color: C.textDim, marginTop: 3 }}>tasks done</div>
                   </div>
@@ -338,28 +671,20 @@ export default function App() {
               ))}
 
               {/* Tasks */}
-              <div style={card(`${phase.color}22`)}>
+              <div style={card(`${activeStage.color}22`)}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                  <span style={lbl}>TASKS — DAY {st.day}</span>
-                  <span style={{ fontSize: 10, color: dayPct(st.day) === 100 ? "#52D68A" : "#444" }}>{dayDone(st.day)}/{dayTotal(st.day)}</span>
+                  <span style={lbl}>TASKS — {activeStage.label.toUpperCase()}</span>
+                  <span style={{ fontSize: 10, color: groupPct(activeGroup) === 100 ? "#52D68A" : "#444" }}>
+                    {groupDoneCount(activeGroup)}/{groupTotalCount(activeGroup)}
+                  </span>
                 </div>
-                {(TODOS[st.day] || []).map(todo => {
-                  const done = !!st.checked[st.day]?.[todo.id];
-                  return (
-                    <button key={todo.id} onClick={() => tog(st.day, todo.id)}
-                      style={{ display: "flex", gap: 12, alignItems: "flex-start", background: "none", border: "none", width: "100%", textAlign: "left", padding: "9px 0", borderBottom: `1px solid ${C.border}` }}>
-                      <div style={{
-                        width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1,
-                        border: `1.5px solid ${done ? phase.color : "#2a2a2a"}`,
-                        background: done ? phase.color : "transparent",
-                        display: "flex", alignItems: "center", justifyContent: "center", transition: "all .15s"
-                      }}>
-                        {done && <svg width="9" height="7" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6 8 1" stroke="#080808" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>}
-                      </div>
-                      <span style={{ fontSize: 12, lineHeight: 1.55, color: done ? "#3a3a3a" : C.text, textDecoration: done ? "line-through" : "none", transition: "color .15s" }}>{todo.text}</span>
-                    </button>
-                  );
-                })}
+                <TaskList
+                  todos={activeGroup.todos || []}
+                  onToggle={togTodo}
+                  isDone={isTodoDone}
+                  accentColor={activeStage.color}
+                  C={C}
+                />
               </div>
 
               {/* Quick metric log for experiment days */}
@@ -382,18 +707,35 @@ export default function App() {
                 </div>
               )}
 
-              {/* Next day preview */}
-              {st.day < 7 && (
-                <div style={{ ...card(), opacity: 0.45, marginTop: 4 }}>
-                  <span style={lbl}>TOMORROW — DAY {st.day + 1} PREVIEW</span>
-                  {(TODOS[st.day + 1] || []).slice(0, 3).map(t => (
-                    <div key={t.id} style={{ padding: "6px 0", borderBottom: `1px solid ${C.border}`, fontSize: 11, color: "#333", display: "flex", gap: 8 }}>
-                      <span>○</span><span>{t.text}</span>
-                    </div>
-                  ))}
-                  {(TODOS[st.day + 1]?.length || 0) > 3 && <div style={{ fontSize: 10, color: "#252525", paddingTop: 6 }}>+{(TODOS[st.day + 1]?.length || 0) - 3} more tasks</div>}
+              {/* Task group navigation (linear access only) */}
+              <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ fontSize: 10, color: "#444" }}>
+                  Group {activeIdx + 1} of {flatTaskGroups.length}
                 </div>
-              )}
+                <button
+                  disabled={activeIdx >= flatTaskGroups.length - 1 || groupPct(activeGroup) < 100}
+                  onClick={() => {
+                    if (groupPct(activeGroup) < 100) return;
+                    setSt(p => ({
+                      ...p,
+                      activeTaskIndex: Math.min(activeIdx + 1, flatTaskGroups.length - 1),
+                    }));
+                  }}
+                  style={{
+                    padding: "6px 10px",
+                    fontSize: 10,
+                    letterSpacing: 2,
+                    borderRadius: 4,
+                    border: `1px solid ${groupPct(activeGroup) === 100 ? activeStage.color : "#222"}`,
+                    background: groupPct(activeGroup) === 100 ? activeStage.dim : "#0b0b0b",
+                    color: groupPct(activeGroup) === 100 ? activeStage.color : "#444",
+                    cursor: groupPct(activeGroup) === 100 ? "pointer" : "not-allowed",
+                    textTransform: "uppercase",
+                  }}
+                >
+                  Next group →
+                </button>
+              </div>
             </div>
           )}
 
