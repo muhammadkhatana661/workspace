@@ -242,7 +242,10 @@ function sumField(metricsObj, key) {
 function getEmptyState() {
   return {
     startDate: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
-    checked: {},
+    checkedTodos: {},
+    lockedTodos: {},
+    todoMeta: {},
+    activeTaskIndex: 0,
     metrics: Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map(d => [d, { attempts: "", replies: "", shows: "", closes: "", revenue: "" }])),
     hyp: { who: "", pain: "", outcome: "", price: "", channel: "" },
     leak: "",
@@ -262,10 +265,77 @@ function SSQTracker({ supabase, session }) {
   const [rawSt, setSt] = useState(getEmptyState);
   const [tab, setTab] = useState("today");
   const [loadingInitial, setLoadingInitial] = useState(true);
-  const timer = useRef(null);
-  const lastSavedState = useRef(null);
   const [interactionError, setInteractionError] = useState("");
 
+  // ── Sync state machine ──────────────────────────────────────────────────
+  // We never fire a new save while one is already in-flight. Instead we keep
+  // the latest state that needs pushing in `pendingRef`. When a save finishes
+  // we immediately push the pending snapshot if one exists, draining the queue.
+  //
+  //  saveStatusRef: "idle" | "saving"
+  //    idle   — nothing running
+  //    saving — a fetch() is in-flight; any new change is stored in pendingRef
+  //
+  // `lastSavedRef` holds the JSON of the last snapshot written to the DB.
+  // Used to suppress realtime echoes of our own writes.
+  const saveStatusRef = useRef("idle");
+  const [saveIndicator, setSaveIndicator] = useState("saved"); // "saved"|"saving"|"unsaved"
+  const pendingRef = useRef(null);   // latest rawSt waiting to be saved
+  const lastSavedRef = useRef(null);   // JSON string of last successfully written snapshot
+
+  // Recursively drains the pending queue after each completed write.
+  const pushToDb = useRef(null);
+  pushToDb.current = async (snapshot) => {
+    saveStatusRef.current = "saving";
+    setSaveIndicator("saving");
+    try {
+      const { error } = await supabase
+        .from('app_state')
+        .update({ data: snapshot })
+        .eq('id', 1);
+      if (!error) lastSavedRef.current = JSON.stringify(snapshot);
+    } catch (e) {
+      console.error("Save error", e);
+    }
+    if (pendingRef.current !== null) {
+      const next = pendingRef.current;
+      pendingRef.current = null;
+      pushToDb.current(next);          // push the freshest snapshot immediately
+    } else {
+      saveStatusRef.current = "idle";
+      setSaveIndicator("saved");
+    }
+  };
+
+  // Called by every state mutation. Either starts a save or queues the snapshot.
+  const scheduleSave = useRef(null);
+  scheduleSave.current = (snapshot) => {
+    setSaveIndicator("unsaved");
+    if (saveStatusRef.current === "idle") {
+      // Short debounce so rapid clicks (e.g. checking several boxes quickly)
+      // are still batched into a single request.
+      saveStatusRef.current = "saving";
+      setTimeout(() => pushToDb.current(snapshot), 400);
+    } else {
+      // A save is in-flight — store the latest snapshot; it will be flushed
+      // the moment the current save resolves.
+      pendingRef.current = snapshot;
+    }
+  };
+
+  // Warn before closing the tab while changes are still in-flight.
+  useEffect(() => {
+    const guard = (e) => {
+      if (saveStatusRef.current !== "idle" || pendingRef.current !== null) {
+        e.preventDefault();
+        e.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", guard);
+    return () => window.removeEventListener("beforeunload", guard);
+  }, []);
+
+  // ── Initial load + realtime subscription ───────────────────────────────
   useEffect(() => {
     let subscription;
 
@@ -275,8 +345,8 @@ function SSQTracker({ supabase, session }) {
         .select('data')
         .eq('id', 1)
         .single();
-
-      if (!error && data && data.data) {
+      if (!error && data?.data) {
+        lastSavedRef.current = JSON.stringify(data.data);
         setSt(prev => ({ ...prev, ...data.data }));
       }
       setLoadingInitial(false);
@@ -287,27 +357,26 @@ function SSQTracker({ supabase, session }) {
     subscription = supabase
       .channel('public:app_state')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_state', filter: 'id=eq.1' }, (payload) => {
-        if (payload.new && payload.new.data) {
-          const remoteStr = JSON.stringify(payload.new.data);
+        if (!payload.new?.data) return;
+        const remoteStr = JSON.stringify(payload.new.data);
 
-          // Ignore echo of our own recent save
-          if (remoteStr === lastSavedState.current) {
-            return;
-          }
+        // Suppress our own echo.
+        if (remoteStr === lastSavedRef.current) return;
 
-          setSt(prev => {
-            if (JSON.stringify(prev) !== remoteStr) {
-              return payload.new.data; // Adopt the remote truth completely
-            }
-            return prev;
-          });
-        }
+        // Ignore remote updates while we have unsaved local changes — our
+        // pending write will land after this one and become the DB truth.
+        if (saveStatusRef.current !== "idle" || pendingRef.current !== null) return;
+
+        // Safe to adopt: no local changes in-flight.
+        setSt(prev => {
+          if (JSON.stringify(prev) === remoteStr) return prev;
+          lastSavedRef.current = remoteStr;
+          return payload.new.data;
+        });
       })
       .subscribe();
 
-    return () => {
-      if (subscription) supabase.removeChannel(subscription);
-    }
+    return () => { if (subscription) supabase.removeChannel(subscription); };
   }, []);
 
 
@@ -405,8 +474,20 @@ function SSQTracker({ supabase, session }) {
   const stageForDay = (day) =>
     TASK_STAGES.find(s => day >= s.startDay && day <= s.endDay) || TASK_STAGES[0];
 
-  const upd = patch => setSt(p => ({ ...p, ...patch }));
-  const stStr = JSON.stringify(st); // stable reference for effect
+  // ── State mutation helpers ─────────────────────────────────────────────
+  // Every helper that changes rawSt calls scheduleSave(nextState) so the
+  // queue-based sync picks it up. We compute the next state explicitly
+  // (instead of relying on React's async setState batching) so we can pass
+  // the exact snapshot to the save queue synchronously.
+
+  const upd = (patch) => {
+    setSt(p => {
+      const next = { ...p, ...patch };
+      if (!loadingInitial) scheduleSave.current(next);
+      return next;
+    });
+  };
+
   const togTodo = (todo, context = {}) => {
     const key = `${todo.id}`;
     const myEmail = session?.user?.email || null;
@@ -414,57 +495,43 @@ function SSQTracker({ supabase, session }) {
     setSt(p => {
       const prevChecked = !!p.checkedTodos?.[key];
       const nextChecked = !prevChecked;
+      const nextCheckedTodos = { ...(p.checkedTodos || {}), [key]: nextChecked };
 
-      const nextCheckedTodos = {
-        ...(p.checkedTodos || {}),
-        [key]: nextChecked,
-      };
-
-      // If unchecking, just flip the boolean and keep any existing metadata.
+      let next;
       if (!nextChecked) {
-        return {
+        next = { ...p, checkedTodos: nextCheckedTodos };
+      } else {
+        const lockedInfo = p.lockedTodos?.[key] || {};
+        const startedAt = lockedInfo.lockedAt || context.lockedAt || Date.now();
+        const completedAt = Date.now();
+        const completedBy =
+          myEmail || context.lockedByEmail || lockedInfo.lockedBy ||
+          p.todoMeta?.[key]?.completedBy || null;
+        const durationMs = completedAt - startedAt;
+        const prevMeta = p.todoMeta || {};
+        const existingMeta = prevMeta[key] || {};
+        const isDelayed = context.isDelayed ?? existingMeta.isDelayed ?? false;
+        next = {
           ...p,
           checkedTodos: nextCheckedTodos,
+          todoMeta: {
+            ...prevMeta,
+            [key]: { ...existingMeta, startedAt, completedAt, completedBy, durationMs, isDelayed },
+          },
         };
       }
-
-      const lockedInfo = p.lockedTodos?.[key] || {};
-      const startedAt = lockedInfo.lockedAt || context.lockedAt || Date.now();
-      const completedAt = Date.now();
-      const completedBy =
-        myEmail ||
-        context.lockedByEmail ||
-        lockedInfo.lockedBy ||
-        p.todoMeta?.[key]?.completedBy ||
-        null;
-
-      const durationMs = completedAt - startedAt;
-      const prevMeta = p.todoMeta || {};
-      const existingMeta = prevMeta[key] || {};
-      const isDelayed = context.isDelayed ?? existingMeta.isDelayed ?? false;
-
-      return {
-        ...p,
-        checkedTodos: nextCheckedTodos,
-        todoMeta: {
-          ...prevMeta,
-          [key]: {
-            ...existingMeta,
-            startedAt,
-            completedAt,
-            completedBy,
-            durationMs,
-            isDelayed,
-          },
-        },
-      };
+      if (!loadingInitial) scheduleSave.current(next);
+      return next;
     });
   };
 
-  const setM = (day, key, val) => setSt(p => ({
-    ...p,
-    metrics: { ...p.metrics, [day]: { ...p.metrics[day], [key]: val } }
-  }));
+  const setM = (day, key, val) => {
+    setSt(p => {
+      const next = { ...p, metrics: { ...p.metrics, [day]: { ...p.metrics[day], [key]: val } } };
+      if (!loadingInitial) scheduleSave.current(next);
+      return next;
+    });
+  };
 
   const totAtt = sumField(st.metrics, "attempts");
   const totRep = sumField(st.metrics, "replies");
@@ -514,22 +581,7 @@ function SSQTracker({ supabase, session }) {
     return () => clearInterval(id);
   }, []);
 
-  useEffect(() => {
-    if (loadingInitial) return;
 
-    clearTimeout(timer.current);
-    timer.current = setTimeout(async () => {
-      try {
-        lastSavedState.current = JSON.stringify(st);
-        await supabase
-          .from('app_state')
-          .update({ data: st })
-          .eq('id', 1);
-      } catch (e) {
-        console.error("Error saving state", e);
-      }
-    }, 800);
-  }, [stStr, loadingInitial]);
 
   if (loadingInitial) {
     return (
@@ -539,10 +591,14 @@ function SSQTracker({ supabase, session }) {
     );
   }
   // Helper component rendered inline for task trees with locking + timers
-  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0, onInteractionError, inheritedLockEmail, prevTasksDone = true }) {
+  //
+  // `enforceSequential` — when true, each sibling must be fully done before the next
+  //   can be started. This is only enabled for children INSIDE an isGroup node, NOT
+  //   at the top level of a task-group (where all top-level todos are freely accessible).
+  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0, onInteractionError, inheritedLockEmail, enforceSequential = false }) {
 
-    // 1. Group-level locking: Check if ANY task in this current array (or sub-arrays) is locked.
-    // That lock applies to the *entire* list of todos on this level and below.
+    // Find the email of whoever has an active lock anywhere inside a list of children.
+    // Used to surface a group-level "who is working on this" attribution.
     const findGroupLock = (list) => {
       for (const t of list) {
         if (st.lockedTodos?.[t.id]?.lockedBy) return st.lockedTodos[t.id].lockedBy;
@@ -554,138 +610,133 @@ function SSQTracker({ supabase, session }) {
       return null;
     };
 
-    // We will keep a running tally of "are all previous siblings done?"
-    let allPreviousSiblingsDone = prevTasksDone;
+    // Running tally for sequential blocking — only meaningful when enforceSequential=true.
+    let allPreviousSiblingsDone = true;
 
     return (
       <div>
-        {todos.map((todo, idx) => {
+        {todos.map((todo) => {
           const done = !todo.isGroup && isDone(todo);
-          // If it's a group, checking if all its children are done
+          // A group row is "fully done" only when all its leaf descendants are checked.
           const isGroupFullyDone = todo.isGroup ? groupPct(todo) === 100 : done;
 
           const isGroup = todo.isGroup;
           const key = todo.id;
           const meta = st.todoMeta?.[key];
           const isDelayed = !!meta?.isDelayed;
+          const myEmail = session?.user?.email;
 
-          // An individual todo is locked either explicitly, or implicitly by the group lock.
-          const explicitLock = st.lockedTodos?.[key];
-          const lockedByEmail = explicitLock?.lockedBy || inheritedLockEmail;
-          const locked = !!lockedByEmail;
-          const lockedAt = explicitLock?.lockedAt || (locked ? Date.now() : null); // fallback if implicitly locked
+          // ── Locking for leaf todos ──────────────────────────────────────────
+          // A leaf is locked either explicitly (it holds its own lock entry) or
+          // implicitly because an ancestor group passed down inheritedLockEmail.
+          const explicitLock = !isGroup ? st.lockedTodos?.[key] : null;
+          const leafLockedByEmail = !isGroup ? (explicitLock?.lockedBy || inheritedLockEmail) : null;
+          const leafLocked = !!leafLockedByEmail;
+          const leafLockedAt = explicitLock?.lockedAt || null;
+          const isLeafLockedByMe = leafLocked && leafLockedByEmail === myEmail;
+          const isLeafLockedByOther = leafLocked && leafLockedByEmail !== myEmail;
 
+          // ── Attribution for group rows ───────────────────────────────────────
+          // When any child of this group is locked, show the locker's name on
+          // the GROUP header row — not on every individual child inside it.
+          const groupActiveLockEmail = isGroup ? (findGroupLock(todo.children || []) || inheritedLockEmail) : null;
+          const groupIsLockedByOther = !!groupActiveLockEmail && groupActiveLockEmail !== myEmail;
+
+          // ── Timer (only for explicit leaf locks with a known lockedAt) ──────
           const minutes = todo.minutes || 0;
           const deadlineMs = minutes * 60 * 1000;
-          const remainingMs = locked && explicitLock?.lockedAt ? Math.max(0, explicitLock.lockedAt + deadlineMs - now) : null;
+          const remainingMs = leafLocked && leafLockedAt ? Math.max(0, leafLockedAt + deadlineMs - now) : null;
           const remainingMin = remainingMs != null ? Math.floor(remainingMs / 60000) : null;
           const remainingSec = remainingMs != null ? Math.floor((remainingMs % 60000) / 1000) : null;
 
-          const myEmail = session?.user?.email;
-          const isLockedByMe = locked && (lockedByEmail === myEmail);
-
-          // Sequential Block Logic: This task is blocked if previous siblings are NOT done.
-          const sequentialBlocked = !allPreviousSiblingsDone;
-
-          // After processing this todo, update the running tally for the NEXT sibling in the map.
+          // ── Sequential blocking — only inside todo groups ───────────────────
+          // Bug 2 fix: top-level task-group todos are never sequentially blocked
+          // (enforceSequential=false at the root). Only children of an isGroup node
+          // are sequential (enforceSequential=true passed when rendering children).
+          const sequentialBlocked = enforceSequential && !allPreviousSiblingsDone;
           allPreviousSiblingsDone = allPreviousSiblingsDone && isGroupFullyDone;
-          // Support legacy lockedTodos without a lockedBy email by prioritizing myEmail (assume my old lock if missing email).
-          const isLockedByOther = !!lockedByEmail && lockedByEmail !== myEmail;
 
+          // ── Lock toggle handler (leaves only) ──────────────────────────────
           const toggleLock = () => {
-            if (isLockedByOther || sequentialBlocked) {
-              if (onInteractionError) {
-                if (sequentialBlocked) {
-                  onInteractionError("Please complete the previous task first.");
-                } else if (lockedByEmail) {
-                  onInteractionError(`This entire task group is in progress by ${lockedByEmail.split('@')[0]}.`);
-                } else {
-                  onInteractionError("This task group is in progress by someone else.");
+            if (sequentialBlocked) {
+              onInteractionError && onInteractionError("Complete the previous task first.");
+              return;
+            }
+            if (isLeafLockedByOther) {
+              onInteractionError && onInteractionError(`${leafLockedByEmail.split('@')[0]} is working on this task.`);
+              return;
+            }
+            onInteractionError && onInteractionError("");
+
+            setSt(p => {
+              const existing = p.lockedTodos || {};
+              let nextState;
+              // Toggle off — user is releasing their own lock
+              if (existing[key]?.lockedBy === myEmail) {
+                const copy = { ...existing };
+                delete copy[key];
+                nextState = { ...p, lockedTodos: copy };
+              } else {
+                // Switch to this task — release any other lock held by this user
+                // (one active task per person, but teammates can lock different tasks simultaneously)
+                const next = { ...existing };
+                for (const k in next) {
+                  if (next[k]?.lockedBy === myEmail) delete next[k];
                 }
+                next[key] = { lockedAt: Date.now(), lockedBy: myEmail };
+                nextState = { ...p, lockedTodos: next };
+              }
+              scheduleSave.current(nextState);
+              return nextState;
+            });
+          };
+
+          // ── Checkbox click handler (leaves only) ────────────────────────────
+          const handleCheck = () => {
+            // Bug 1 fix: if the task is already done, always allow unchecking — no lock needed.
+            if (done) {
+              onInteractionError && onInteractionError("");
+              onToggle(todo, { lockedAt: leafLockedAt, lockedByEmail: leafLockedByEmail, isDelayed });
+              return;
+            }
+
+            if (sequentialBlocked) {
+              onInteractionError && onInteractionError("Complete the previous task first.");
+              return;
+            }
+            if (!isLeafLockedByMe) {
+              if (!leafLocked) {
+                onInteractionError && onInteractionError("Start this task before marking it done.");
+              } else if (isLeafLockedByOther) {
+                const who = leafLockedByEmail ? leafLockedByEmail.split("@")[0] : "someone else";
+                onInteractionError && onInteractionError(`Only ${who} can complete this task.`);
               }
               return;
             }
 
-            if (onInteractionError) {
-              onInteractionError("");
+            onInteractionError && onInteractionError("");
+            const nowTs = Date.now();
+            let isTodoDelayed = !!isDelayed;
+            if (!isTodoDelayed && minutes > 0 && leafLockedAt) {
+              if (nowTs > leafLockedAt + minutes * 60 * 1000) isTodoDelayed = true;
             }
-
-            setSt(p => {
-              const existing = p.lockedTodos || {};
-              // For group locking locking, if the user starts the first task, all tasks in this group should logically derive from that lock or we just lock the parent context. 
-              // A simpler way: just lock THIS specific todo, but the `groupLockEmail` prop passed down from the parent group will enforce uniform visual locking.
-              // To ensure the actual lock logic covers the whole group, we can set a lock on the `groupId` instead, BUT our state is keyed by todo id.
-              // Instead, we just lock this specific todo, and the parent `TaskList` calculates the `groupLockEmail` by scanning all siblings.
-
-              if (existing[key] && existing[key].lockedBy === myEmail) {
-                const copy = { ...existing };
-                delete copy[key];
-                return { ...p, lockedTodos: copy };
-              }
-
-              const newLockedTodos = { ...existing };
-              for (const k in newLockedTodos) {
-                if (newLockedTodos[k].lockedBy === myEmail) {
-                  delete newLockedTodos[k];
-                }
-              }
-
-              newLockedTodos[key] = { lockedAt: Date.now(), lockedBy: myEmail };
-              return { ...p, lockedTodos: newLockedTodos };
-            });
+            onToggle(todo, { lockedAt: leafLockedAt, lockedByEmail: leafLockedByEmail, isDelayed: isTodoDelayed });
           };
 
           return (
             <div key={todo.id} style={{ marginLeft: depth * 14, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
               <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-                {!isGroup && (
+
+                {/* ── Checkbox (leaves) or Group marker ── */}
+                {!isGroup ? (
                   <button
-                    onClick={() => {
-                      if (sequentialBlocked) {
-                        onInteractionError && onInteractionError("Complete the previous task first.");
-                        return;
-                      }
-
-                      if (!isLockedByMe) {
-                        if (!locked) {
-                          onInteractionError && onInteractionError("Start this task before marking it done.");
-                        } else if (isLockedByOther) {
-                          const who = lockedByEmail ? lockedByEmail.split("@")[0] : "someone else";
-                          onInteractionError && onInteractionError(`Only ${who} can complete this task.`);
-                        } else {
-                          onInteractionError && onInteractionError("Only the person who started this task can complete it.");
-                        }
-                        return;
-                      }
-
-                      onInteractionError && onInteractionError("");
-                      const nowTs = Date.now();
-                      let isTodoDelayed = !!isDelayed;
-                      if (!isTodoDelayed && minutes > 0 && lockedAt) {
-                        const todoDeadline = lockedAt + minutes * 60 * 1000;
-                        if (nowTs > todoDeadline) {
-                          isTodoDelayed = true;
-                        }
-                      }
-                      onToggle(todo, {
-                        lockedAt,
-                        lockedByEmail,
-                        isDelayed: isTodoDelayed,
-                      });
-                    }}
+                    onClick={handleCheck}
                     style={{
-                      width: 17,
-                      height: 17,
-                      borderRadius: 3,
-                      flexShrink: 0,
-                      marginTop: 1,
+                      width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1,
                       border: `1.5px solid ${done ? accentColor : "#2a2a2a"}`,
                       background: done ? accentColor : "transparent",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      transition: "all .15s",
-                      cursor: "pointer",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      transition: "all .15s", cursor: "pointer",
                     }}
                   >
                     {done && (
@@ -694,78 +745,101 @@ function SSQTracker({ supabase, session }) {
                       </svg>
                     )}
                   </button>
-                )}
-
-                {isGroup && (
-                  <div
-                    style={{
-                      width: 17,
-                      height: 17,
-                      borderRadius: 3,
-                      flexShrink: 0,
-                      marginTop: 1,
-                      border: `1.5px solid #2a2a2a`,
-                      background: "#050505",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: 10,
-                      color: "#444",
-                    }}
-                  >
-                    G
-                  </div>
+                ) : (
+                  <div style={{
+                    width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1,
+                    border: `1.5px solid #2a2a2a`, background: "#050505",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 10, color: "#444",
+                  }}>G</div>
                 )}
 
                 <div style={{ flex: 1 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                    <span
-                      style={{
-                        fontSize: 12,
-                        lineHeight: 1.55,
-                        color: done ? "#3a3a3a" : C.text,
-                        textDecoration: done ? "line-through" : "none",
-                        transition: "color .15s",
-                      }}
-                    >
+                    <span style={{
+                      fontSize: 12, lineHeight: 1.55,
+                      color: done ? "#3a3a3a" : C.text,
+                      textDecoration: done ? "line-through" : "none",
+                      transition: "color .15s",
+                    }}>
                       {todo.label}
                       {isDelayed && " (Time Limit Exceeded)"}
                     </span>
+
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                      {/* Bug 4 fix: minutes badge only on leaf todos */}
                       {minutes > 0 && !isGroup && (
                         <span style={{ fontSize: 9, color: "#444" }}>{minutes}m</span>
                       )}
+
+                      {/* Bug 4 fix: "Start / Working / By X" button on leaf todos only,
+                          and only while the task is not yet done */}
                       {!isGroup && !done && (
                         <button
                           onClick={toggleLock}
-                          disabled={isLockedByOther}
+                          disabled={isLeafLockedByOther}
                           style={{
-                            fontSize: 9,
-                            letterSpacing: 1,
-                            padding: "3px 7px",
-                            borderRadius: 3,
-                            border: `1px solid ${isLockedByOther ? "#444" : isLockedByMe ? accentColor : "#222"}`,
-                            background: isLockedByOther ? "#111" : isLockedByMe ? accentColor : "transparent",
-                            color: isLockedByOther ? "#555" : isLockedByMe ? "#080808" : "#555",
+                            fontSize: 9, letterSpacing: 1, padding: "3px 7px", borderRadius: 3,
+                            border: `1px solid ${isLeafLockedByOther ? "#444" : isLeafLockedByMe ? accentColor : "#222"}`,
+                            background: isLeafLockedByOther ? "#111" : isLeafLockedByMe ? accentColor : "transparent",
+                            color: isLeafLockedByOther ? "#555" : isLeafLockedByMe ? "#080808" : "#555",
                             textTransform: "uppercase",
-                            cursor: isLockedByOther ? "not-allowed" : "pointer",
-                            opacity: isLockedByOther ? 0.7 : 1,
+                            cursor: isLeafLockedByOther ? "not-allowed" : "pointer",
+                            opacity: isLeafLockedByOther ? 0.7 : 1,
                           }}
                         >
-                          {isLockedByOther ? `By ${lockedByEmail.split('@')[0]}` : isLockedByMe ? "Working" : "Start"}
+                          {isLeafLockedByOther
+                            ? `By ${leafLockedByEmail.split('@')[0]}`
+                            : isLeafLockedByMe ? "Working" : "Start"}
                         </button>
+                      )}
+
+                      {/* Bug 4 fix: group attribution shown on the GROUP row header only */}
+                      {isGroup && groupActiveLockEmail && !isGroupFullyDone && (
+                        <span style={{
+                          fontSize: 9, letterSpacing: 1, padding: "3px 7px", borderRadius: 3,
+                          border: `1px solid ${groupIsLockedByOther ? "#444" : accentColor}`,
+                          background: groupIsLockedByOther ? "#111" : accentColor,
+                          color: groupIsLockedByOther ? "#555" : "#080808",
+                          textTransform: "uppercase",
+                        }}>
+                          {groupIsLockedByOther
+                            ? `By ${groupActiveLockEmail.split('@')[0]}`
+                            : "Working"}
+                        </span>
                       )}
                     </div>
                   </div>
 
-                  {locked && remainingMs != null && (
+                  {/* Bug 4 fix: timer only shown on the leaf that holds the explicit lock,
+                      not propagated to siblings via inheritedLockEmail */}
+                  {!isGroup && leafLockedAt && remainingMs != null && (
                     <div style={{ marginTop: 4, fontSize: 10, color: remainingMs === 0 ? "#F06449" : accentColor }}>
-                      {remainingMs === 0 ? "Deadline passed" : `Time left: ${remainingMin}m ${remainingSec.toString().padStart(2, "0")}s`}
+                      {remainingMs === 0
+                        ? "Deadline passed"
+                        : `Time left: ${remainingMin}m ${remainingSec.toString().padStart(2, "0")}s`}
+                    </div>
+
+                  )}
+                  {!isGroup && todo.detail && isLeafLockedByMe && !done && (
+                    <div style={{
+                      marginTop: 8,
+                      padding: "8px 12px",
+                      background: "#0f0f0f",
+                      border: `1px solid ${accentColor}22`,
+                      borderLeft: `2px solid ${accentColor}`,
+                      borderRadius: 4,
+                      fontSize: 11,
+                      color: "#666",
+                      lineHeight: 1.7,
+                    }}>
+                      {todo.detail}
                     </div>
                   )}
                 </div>
               </div>
 
+              {/* Recurse into group children — sequential ordering ON inside groups */}
               {isGroup && todo.children && todo.children.length > 0 && (
                 <div style={{ marginTop: 4 }}>
                   <TaskList
@@ -776,9 +850,8 @@ function SSQTracker({ supabase, session }) {
                     C={C}
                     depth={depth + 1}
                     onInteractionError={onInteractionError}
-                    inheritedLockEmail={findGroupLock(todo.children) || inheritedLockEmail}
-                    // For children, if the parent is blocked sequentially, the children are too.
-                    prevTasksDone={!sequentialBlocked}
+                    inheritedLockEmail={groupActiveLockEmail}
+                    enforceSequential={true}
                   />
                 </div>
               )}
@@ -911,7 +984,18 @@ function SSQTracker({ supabase, session }) {
             <span style={{ fontSize: 10, fontWeight: 700, color: activeStage.color }}>{weekPct}%</span>
           </div>
 
-          {/* Users stay signed in; no explicit sign-out button */}
+          {/* Save status indicator */}
+          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <div style={{
+              width: 5, height: 5, borderRadius: "50%",
+              background: saveIndicator === "saved" ? "#52D68A" : saveIndicator === "saving" ? "#E8C547" : "#F06449",
+              transition: "background .3s",
+              animation: saveIndicator === "saving" ? "blink 1s infinite" : "none",
+            }} />
+            <span style={{ fontSize: 9, letterSpacing: 2, color: saveIndicator === "saved" ? "#2a6640" : saveIndicator === "saving" ? "#6b5a1a" : "#6b2a1a" }}>
+              {saveIndicator === "saved" ? "SAVED" : saveIndicator === "saving" ? "SAVING..." : "UNSAVED"}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -938,9 +1022,11 @@ function SSQTracker({ supabase, session }) {
                   <div style={{ fontSize: 10, color: "#444", letterSpacing: .5 }}>
                     Task group window: Day {activeGroup.startDay}{activeGroup.endDay !== activeGroup.startDay ? `–${activeGroup.endDay}` : ""}
                   </div>
-                  <div style={{ fontSize: 10, color: "#E8C547", marginTop: 4, letterSpacing: .5 }}>
-                    Requirements: {activeGroup.requirements && activeGroup.requirements.length > 0 ? activeGroup.requirements.join(", ") : "no special requirements"}
-                  </div>
+                  {activeGroup.requirements && activeGroup.requirements.length > 0 && (
+                    <div style={{ fontSize: 10, color: "#E8C547", marginTop: 4, letterSpacing: .5 }}>
+                      Requirements: {activeGroup.requirements.join(", ")}
+                    </div>
+                  )}
                   {activeGroupDelayed && (
                     <div style={{ fontSize: 10, color: "#F06449", marginTop: 4, letterSpacing: .5 }}>
                       This task group is delayed.
@@ -1035,10 +1121,11 @@ function SSQTracker({ supabase, session }) {
                   disabled={activeIdx >= flatTaskGroups.length - 1 || groupPct(activeGroup) < 100}
                   onClick={() => {
                     if (groupPct(activeGroup) < 100) return;
-                    setSt(p => ({
-                      ...p,
-                      activeTaskIndex: Math.min(activeIdx + 1, flatTaskGroups.length - 1),
-                    }));
+                    setSt(p => {
+                      const next = { ...p, activeTaskIndex: Math.min(activeIdx + 1, flatTaskGroups.length - 1) };
+                      scheduleSave.current(next);
+                      return next;
+                    });
                   }}
                   style={{
                     padding: "6px 10px",
