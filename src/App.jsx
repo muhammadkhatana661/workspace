@@ -554,9 +554,6 @@ function SSQTracker({ supabase, session }) {
       return null;
     };
 
-    // The group is locked to whoever started any task inside it.
-    const thisGroupLockEmail = findGroupLock(todos) || inheritedLockEmail;
-
     // We will keep a running tally of "are all previous siblings done?"
     let allPreviousSiblingsDone = prevTasksDone;
 
@@ -574,7 +571,7 @@ function SSQTracker({ supabase, session }) {
 
           // An individual todo is locked either explicitly, or implicitly by the group lock.
           const explicitLock = st.lockedTodos?.[key];
-          const lockedByEmail = explicitLock?.lockedBy || thisGroupLockEmail;
+          const lockedByEmail = explicitLock?.lockedBy || inheritedLockEmail;
           const locked = !!lockedByEmail;
           const lockedAt = explicitLock?.lockedAt || (locked ? Date.now() : null); // fallback if implicitly locked
 
@@ -732,7 +729,7 @@ function SSQTracker({ supabase, session }) {
                       }}
                     >
                       {todo.label}
-                      {isDelayed && " (Delayed)"}
+                      {isDelayed && " (Time Limit Exceeded)"}
                     </span>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                       {minutes > 0 && !isGroup && (
@@ -779,7 +776,7 @@ function SSQTracker({ supabase, session }) {
                     C={C}
                     depth={depth + 1}
                     onInteractionError={onInteractionError}
-                    inheritedLockEmail={thisGroupLockEmail}
+                    inheritedLockEmail={findGroupLock(todo.children) || inheritedLockEmail}
                     // For children, if the parent is blocked sequentially, the children are too.
                     prevTasksDone={!sequentialBlocked}
                   />
