@@ -24,7 +24,7 @@ export default function Auth({ supabase }) {
         email: trimmed,
         password,
         options: {
-          emailRedirectTo: window.location.origin,
+          emailRedirectTo: "https://workspace-8k5tprgr2-muhammadkhatana661s-projects.vercel.app/",
         }
       });
 
