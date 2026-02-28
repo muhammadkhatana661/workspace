@@ -23,6 +23,9 @@ export default function Auth({ supabase }) {
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email: trimmed,
         password,
+        options: {
+          emailRedirectTo: window.location.origin,
+        }
       });
 
       // If Supabase has email enumeration protection ON, it won't return an error for existing users.
