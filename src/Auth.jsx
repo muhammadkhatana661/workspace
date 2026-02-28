@@ -1,139 +1,170 @@
-import { useState } from 'react'
-import { supabase } from './supabaseClient'
+import { useMemo, useState } from "react";
 
-// Hardcoded array of allowed emails
-const ALLOWED_EMAILS = [
-    'abdulhadiasghar@outlook.com',
-    'abdulautomates101@gmail.com',
-    'muhammadkhatana661@gmail.com'
-    // Add more emails here
-]
+export default function Auth({ supabase }) {
+  const [mode, setMode] = useState("signin"); // signin | signup
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
 
-export default function Auth({ onLogin }) {
-    const [email, setEmail] = useState('')
-    const [sent, setSent] = useState(false)
-    const [loading, setLoading] = useState(false)
-    const [error, setError] = useState(null)
+  const canSubmit = useMemo(() => {
+    return email.trim().length > 3 && password.length >= 6 && !busy;
+  }, [email, password, busy]);
 
-    // Shared styles to match App.jsx
-    const C = {
-        bg: "#080808", bg2: "#0d0d0d", bg3: "#121212",
-        border: "#1a1a1a", border2: "#222",
-        text: "#C8C5BE", textHi: "#E8E4DC", textDim: "#555",
+  async function onSubmit(e) {
+    e.preventDefault();
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      if (mode === "signin") {
+        const { error } = await supabase.auth.signInWithPassword({
+          email: email.trim(),
+          password,
+        });
+        if (error) throw error;
+        setMsg("Signed in.");
+      } else {
+        const { error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+        });
+        if (error) throw error;
+        setMsg("Account created. You can sign in now.");
+        setMode("signin");
+      }
+    } catch (e2) {
+      setErr(e2?.message || "Auth error");
+    } finally {
+      setBusy(false);
     }
+  }
 
-    const inputStyle = {
-        width: "100%", background: "#0a0a0a", border: `1px solid ${C.border2}`,
-        borderRadius: 4, color: C.textHi, padding: "10px 14px",
-        fontSize: 14, fontFamily: "inherit", outline: "none", lineHeight: 1.6,
-        marginBottom: 16
-    }
+  const C = {
+    bg: "#080808",
+    bg2: "#0d0d0d",
+    border: "#1a1a1a",
+    border2: "#222",
+    text: "#C8C5BE",
+    textHi: "#E8E4DC",
+    textDim: "#555",
+    accent: "#5B9CF6",
+  };
 
-    const buttonStyle = {
-        width: "100%",
-        padding: "10px",
-        background: "#E8C547",
-        color: "#080808",
-        border: "none",
-        borderRadius: 4,
-        fontSize: 14,
-        fontWeight: "bold",
-        cursor: "pointer",
-        fontFamily: "inherit"
-    }
+  const card = {
+    background: C.bg2,
+    border: `1px solid ${C.border}`,
+    borderRadius: 8,
+    padding: 20,
+    width: 420,
+    maxWidth: "100%",
+  };
 
-    const handleSendMagicLink = async (e) => {
-        e.preventDefault()
-        setLoading(true)
-        setError(null)
+  const input = {
+    width: "100%",
+    background: "#0a0a0a",
+    border: `1px solid ${C.border2}`,
+    borderRadius: 6,
+    color: C.textHi,
+    padding: "10px 12px",
+    fontSize: 13,
+    outline: "none",
+    lineHeight: 1.6,
+    fontFamily: "inherit",
+  };
 
-        if (!ALLOWED_EMAILS.includes(email.toLowerCase().trim())) {
-            setError("This email is not authorized to access the application.")
-            setLoading(false)
-            return
-        }
+  const btn = {
+    width: "100%",
+    padding: "10px 12px",
+    fontSize: 11,
+    letterSpacing: 2,
+    borderRadius: 6,
+    border: `1px solid ${C.accent}`,
+    background: canSubmit ? C.accent : "transparent",
+    color: canSubmit ? "#080808" : "#444",
+    textTransform: "uppercase",
+    cursor: canSubmit ? "pointer" : "not-allowed",
+    transition: "all .15s",
+  };
 
-        const { error } = await supabase.auth.signInWithOtp({
-            email: email.trim(),
-        })
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: C.bg,
+        color: C.text,
+        padding: 22,
+        fontFamily: "'IBM Plex Mono','Fira Code','Courier New',monospace",
+      }}
+    >
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&display=swap');
+        * { box-sizing:border-box; }
+        button { font-family: inherit; }
+      `}</style>
 
-        if (error) {
-            setError(error.message)
-        } else {
-            setSent(true)
-        }
-        setLoading(false)
-    }
-
-    return (
-        <div style={{
-            fontFamily: "'IBM Plex Mono','Fira Code','Courier New',monospace",
-            minHeight: "100vh",
-            background: C.bg,
-            color: C.text,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "20px"
-        }}>
-            <div style={{
-                background: C.bg2,
-                border: `1px solid ${C.border}`,
-                borderRadius: 8,
-                padding: "32px",
-                width: "100%",
-                maxWidth: "400px"
-            }}>
-                <div style={{ marginBottom: 24, textAlign: "center" }}>
-                    <h2 style={{ color: C.textHi, margin: "0 0 8px 0", fontSize: 24 }}>SSQ Tracker</h2>
-                    <p style={{ color: C.textDim, margin: 0, fontSize: 12 }}>Authentication Required</p>
-                </div>
-
-                {error && (
-                    <div style={{
-                        padding: "10px",
-                        background: "#4a1c18",
-                        border: "1px solid #F06449",
-                        color: "#F06449",
-                        borderRadius: 4,
-                        marginBottom: 16,
-                        fontSize: 12
-                    }}>
-                        {error}
-                    </div>
-                )}
-
-                {sent ? (
-                    <div style={{ textAlign: "center" }}>
-                        <div style={{ fontSize: 24, marginBottom: 16 }}>Check your email!</div>
-                        <p style={{ color: C.text, fontSize: 14, lineHeight: 1.6, marginBottom: 24 }}>
-                            We've sent a magic login link to <strong>{email}</strong>.
-                            Click the link in the email to log in automatically.
-                        </p>
-                        <button
-                            onClick={() => setSent(false)}
-                            style={{ background: "none", border: "none", color: C.textDim, fontSize: 12, cursor: "pointer", textDecoration: "underline" }}
-                        >
-                            Back to email entry
-                        </button>
-                    </div>
-                ) : (
-                    <form onSubmit={handleSendMagicLink}>
-                        <label style={{ display: "block", fontSize: 10, letterSpacing: 2, color: C.textDim, marginBottom: 8, textTransform: "uppercase" }}>Email Address</label>
-                        <input
-                            type="email"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            placeholder="Enter your email"
-                            required
-                            style={inputStyle}
-                        />
-                        <button type="submit" disabled={loading} style={{ ...buttonStyle, opacity: loading ? 0.7 : 1 }}>
-                            {loading ? "Sending link..." : "Send Magic Link"}
-                        </button>
-                    </form>
-                )}
-            </div>
+      <div style={card}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginBottom: 14 }}>
+          <div style={{ fontSize: 18, fontWeight: 700, color: C.textHi, letterSpacing: -0.5 }}>
+            {mode === "signin" ? "Sign in" : "Create account"}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setErr("");
+              setMsg("");
+              setMode(m => (m === "signin" ? "signup" : "signin"));
+            }}
+            style={{
+              background: "transparent",
+              border: `1px solid ${C.border2}`,
+              borderRadius: 6,
+              padding: "6px 10px",
+              fontSize: 10,
+              letterSpacing: 1,
+              color: "#777",
+              cursor: "pointer",
+              textTransform: "uppercase",
+            }}
+          >
+            {mode === "signin" ? "Sign up" : "Sign in"}
+          </button>
         </div>
-    )
+
+        <div style={{ fontSize: 11, color: "#666", lineHeight: 1.7, marginBottom: 16 }}>
+          Sessions are persisted and refreshed automatically, so previously signed-up users remain valid over time.
+        </div>
+
+        <form onSubmit={onSubmit} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 9, letterSpacing: 3, color: C.textDim, marginBottom: 6, textTransform: "uppercase" }}>Email</div>
+            <input value={email} onChange={e => setEmail(e.target.value)} style={input} autoComplete="email" />
+          </div>
+          <div>
+            <div style={{ fontSize: 9, letterSpacing: 3, color: C.textDim, marginBottom: 6, textTransform: "uppercase" }}>Password</div>
+            <input value={password} onChange={e => setPassword(e.target.value)} style={input} type="password" autoComplete={mode === "signin" ? "current-password" : "new-password"} />
+          </div>
+
+          {err && (
+            <div style={{ padding: "10px 12px", background: "#1a0c0a", border: "1px solid #F0644944", borderRadius: 6, color: "#F06449", fontSize: 11, lineHeight: 1.6 }}>
+              {err}
+            </div>
+          )}
+          {msg && (
+            <div style={{ padding: "10px 12px", background: "#081a0f", border: "1px solid #52D68A44", borderRadius: 6, color: "#52D68A", fontSize: 11, lineHeight: 1.6 }}>
+              {msg}
+            </div>
+          )}
+
+          <button type="submit" disabled={!canSubmit} style={btn}>
+            {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Sign up"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
 }

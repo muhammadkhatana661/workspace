@@ -1,6 +1,4 @@
 import { useState, useEffect, useRef } from "react";
-import Auth from "./Auth";
-import { supabase } from "./supabaseClient";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
 
@@ -256,33 +254,11 @@ function getEmptyState() {
 
 // ─── APP ──────────────────────────────────────────────────────────────────────
 
-export default function App() {
-  const [session, setSession] = useState(null)
-
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-    })
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-    })
-
-    return () => {
-      if (subscription) subscription.unsubscribe()
-    }
-  }, [])
-
-  if (!session) {
-    return <Auth onLogin={setSession} />
-  }
-
-  return <SSQTracker session={session} />
+export default function App({ supabase, session }) {
+  return <SSQTracker supabase={supabase} session={session} />;
 }
 
-function SSQTracker({ session }) {
+function SSQTracker({ supabase, session }) {
   const [rawSt, setSt] = useState(getEmptyState);
   const [tab, setTab] = useState("today");
   const [loadingInitial, setLoadingInitial] = useState(true);
@@ -711,6 +687,25 @@ function SSQTracker({ session }) {
             </div>
             <span style={{ fontSize: 10, fontWeight: 700, color: activeStage.color }}>{weekPct}%</span>
           </div>
+
+          {supabase && (
+            <button
+              onClick={() => supabase.auth.signOut()}
+              title={session?.user?.email || "Sign out"}
+              style={{
+                background: "transparent",
+                border: `1px solid ${C.border2}`,
+                borderRadius: 4,
+                padding: "5px 10px",
+                color: "#666",
+                fontSize: 9,
+                letterSpacing: 2,
+                textTransform: "uppercase",
+              }}
+            >
+              Sign out
+            </button>
+          )}
         </div>
       </div>
 
