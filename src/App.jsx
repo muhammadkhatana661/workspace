@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from "react";
+import Auth from "./Auth";
+import { supabase } from "./supabaseClient";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
 
@@ -239,30 +241,97 @@ function sumField(metricsObj, key) {
 
 // ─── STORAGE ─────────────────────────────────────────────────────────────────
 
-const SK = "exec_w1_v3";
-function loadSaved() {
-  try { const r = localStorage.getItem(SK); return r ? JSON.parse(r) : null; } catch { return null; }
-}
-function buildInit() {
-  const s = loadSaved();
+function getEmptyState() {
   return {
-    startDate: s?.startDate ?? new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
-    checked: s?.checked ?? {},
-    metrics: s?.metrics ?? Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map(d => [d, { attempts: "", replies: "", shows: "", closes: "", revenue: "" }])),
-    hyp: s?.hyp ?? { who: "", pain: "", outcome: "", price: "", channel: "" },
-    leak: s?.leak ?? "",
-    verdict: s?.verdict ?? "",
-    pivotVar: s?.pivotVar ?? "",
-    w2hyp: s?.w2hyp ?? "",
+    startDate: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
+    checked: {},
+    metrics: Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map(d => [d, { attempts: "", replies: "", shows: "", closes: "", revenue: "" }])),
+    hyp: { who: "", pain: "", outcome: "", price: "", channel: "" },
+    leak: "",
+    verdict: "",
+    pivotVar: "",
+    w2hyp: "",
   };
 }
 
 // ─── APP ──────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [rawSt, setSt] = useState(buildInit);
+  const [session, setSession] = useState(null)
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session)
+    })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+    })
+
+    return () => {
+      if (subscription) subscription.unsubscribe()
+    }
+  }, [])
+
+  if (!session) {
+    return <Auth onLogin={setSession} />
+  }
+
+  return <SSQTracker session={session} />
+}
+
+function SSQTracker({ session }) {
+  const [rawSt, setSt] = useState(getEmptyState);
   const [tab, setTab] = useState("today");
+  const [loadingInitial, setLoadingInitial] = useState(true);
   const timer = useRef(null);
+  const lastSavedState = useRef(null);
+
+  useEffect(() => {
+    let subscription;
+
+    async function loadData() {
+      const { data, error } = await supabase
+        .from('app_state')
+        .select('data')
+        .eq('id', 1)
+        .single();
+
+      if (!error && data && data.data) {
+        setSt(prev => ({ ...prev, ...data.data }));
+      }
+      setLoadingInitial(false);
+    }
+
+    loadData();
+
+    subscription = supabase
+      .channel('public:app_state')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_state', filter: 'id=eq.1' }, (payload) => {
+        if (payload.new && payload.new.data) {
+          const remoteStr = JSON.stringify(payload.new.data);
+
+          // Ignore echo of our own recent save
+          if (remoteStr === lastSavedState.current) {
+            return;
+          }
+
+          setSt(prev => {
+            if (JSON.stringify(prev) !== remoteStr) {
+              return payload.new.data; // Adopt the remote truth completely
+            }
+            return prev;
+          });
+        }
+      })
+      .subscribe();
+
+    return () => {
+      if (subscription) supabase.removeChannel(subscription);
+    }
+  }, []);
 
 
 
@@ -330,6 +399,9 @@ export default function App() {
   const allDone = flatTaskGroups.reduce((sum, e) => sum + groupDoneCount(e.group), 0);
   const allTotal = flatTaskGroups.reduce((sum, e) => sum + groupTotalCount(e.group), 0);
   const weekPct = allTotal ? Math.round(allDone / allTotal * 100) : 0;
+
+  const stageForDay = (day) =>
+    TASK_STAGES.find(s => day >= s.startDay && day <= s.endDay) || TASK_STAGES[0];
 
   const upd = patch => setSt(p => ({ ...p, ...patch }));
   const stStr = JSON.stringify(st); // stable reference for effect
@@ -399,11 +471,29 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (loadingInitial) return;
+
     clearTimeout(timer.current);
-    timer.current = setTimeout(() => {
-      try { localStorage.setItem(SK, JSON.stringify(st)); } catch { }
-    }, 400);
-  }, [stStr]);
+    timer.current = setTimeout(async () => {
+      try {
+        lastSavedState.current = JSON.stringify(st);
+        await supabase
+          .from('app_state')
+          .update({ data: st })
+          .eq('id', 1);
+      } catch (e) {
+        console.error("Error saving state", e);
+      }
+    }, 800);
+  }, [stStr, loadingInitial]);
+
+  if (loadingInitial) {
+    return (
+      <div style={{ background: "#080808", color: "#C8C5BE", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "monospace" }}>
+        Loading SSQ Tracker State...
+      </div>
+    );
+  }
   // Helper component rendered inline for task trees with locking + timers
   function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0 }) {
     return (
@@ -420,21 +510,33 @@ export default function App() {
           const remainingMin = remainingMs != null ? Math.floor(remainingMs / 60000) : null;
           const remainingSec = remainingMs != null ? Math.floor((remainingMs % 60000) / 1000) : null;
 
+          const myEmail = session?.user?.email;
+          const lockedByEmail = st.lockedTodos?.[key]?.lockedBy;
+          const isLockedByMe = locked && lockedByEmail === myEmail;
+          // Support legacy lockedTodos without a lockedBy email by prioritizing myEmail (assume my old lock if missing email) or just treat missing email as not mine if we want.
+          const isLockedByOther = locked && lockedByEmail && lockedByEmail !== myEmail;
+
           const toggleLock = () => {
+            if (isLockedByOther) return;
+
             setSt(p => {
               const existing = p.lockedTodos || {};
-              if (existing[key]) {
+
+              if (existing[key] && existing[key].lockedBy === myEmail) {
                 const copy = { ...existing };
                 delete copy[key];
                 return { ...p, lockedTodos: copy };
               }
-              return {
-                ...p,
-                lockedTodos: {
-                  ...existing,
-                  [key]: { lockedAt: Date.now() },
-                },
-              };
+
+              const newLockedTodos = { ...existing };
+              for (const k in newLockedTodos) {
+                if (newLockedTodos[k].lockedBy === myEmail) {
+                  delete newLockedTodos[k];
+                }
+              }
+
+              newLockedTodos[key] = { lockedAt: Date.now(), lockedBy: myEmail };
+              return { ...p, lockedTodos: newLockedTodos };
             });
           };
 
@@ -508,19 +610,21 @@ export default function App() {
                       {!isGroup && (
                         <button
                           onClick={toggleLock}
+                          disabled={isLockedByOther}
                           style={{
                             fontSize: 9,
                             letterSpacing: 1,
                             padding: "3px 7px",
                             borderRadius: 3,
-                            border: `1px solid ${locked ? accentColor : "#222"}`,
-                            background: locked ? accentColor : "transparent",
-                            color: locked ? "#080808" : "#555",
+                            border: `1px solid ${isLockedByOther ? "#444" : isLockedByMe ? accentColor : "#222"}`,
+                            background: isLockedByOther ? "#111" : isLockedByMe ? accentColor : "transparent",
+                            color: isLockedByOther ? "#555" : isLockedByMe ? "#080808" : "#555",
                             textTransform: "uppercase",
-                            cursor: "pointer",
+                            cursor: isLockedByOther ? "not-allowed" : "pointer",
+                            opacity: isLockedByOther ? 0.7 : 1,
                           }}
                         >
-                          {locked ? "Locked" : "Lock"}
+                          {isLockedByOther ? `By ${lockedByEmail.split('@')[0]}` : isLockedByMe ? "Working" : "Start"}
                         </button>
                       )}
                     </div>
@@ -585,7 +689,7 @@ export default function App() {
         ].filter(t => !t.hidden).map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             background: "none", border: "none",
-            borderBottom: `2px solid ${tab === t.id ? phase.color : "transparent"}`,
+            borderBottom: `2px solid ${tab === t.id ? activeStage.color : "transparent"}`,
             color: tab === t.id ? C.textHi : "#444",
             padding: "0 16px", fontSize: 10, letterSpacing: 2,
             transition: "color .15s, border-color .15s",
@@ -834,14 +938,14 @@ export default function App() {
                   <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 540 }}>
                     <thead>
                       <tr>
-                        {["DAY", "PHASE", "ATTEMPTS", "REPLIES", "SHOWS", "CLOSES"].map(h => (
+                        {["DAY", "STAGE", "ATTEMPTS", "REPLIES", "SHOWS", "CLOSES"].map(h => (
                           <th key={h} style={{ padding: "6px 10px", textAlign: h === "DAY" || h === "PHASE" ? "left" : "right", fontSize: 8, letterSpacing: 2, color: "#2a2a2a", borderBottom: `1px solid ${C.border}` }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
                       {[2, 3, 4, 5, 6].map(d => {
-                        const dp = phaseOf(d);
+                        const dp = stageForDay(d);
                         const active = d === st.day;
                         const isOut = d >= 3;
                         return (
@@ -854,7 +958,7 @@ export default function App() {
                                 fontSize: 8, letterSpacing: 2, fontWeight: 700, color: dp.color,
                                 background: dp.dim, border: `1px solid ${dp.color}44`,
                                 padding: "2px 5px", borderRadius: 2
-                              }}>{dp.shortLabel}</span>
+                              }}>{dp.label.toUpperCase()}</span>
                             </td>
                             {METRIC_FIELDS.map(f => (
                               <td key={f.key} style={{ padding: "4px 10px", textAlign: "right", borderBottom: `1px solid ${C.border}` }}>
