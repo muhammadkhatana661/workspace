@@ -19,20 +19,35 @@ export default function Auth({ supabase }) {
     try {
       const trimmed = email.trim();
 
-      // First, attempt to sign up. If the user already exists, Supabase will
-      // return an error we can safely ignore and fall back to sign-in.
+      // First, attempt to sign up. 
       const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email: trimmed,
         password,
       });
 
-      if (!signUpError && signUpData?.session) {
-        setMsg("Account created. You're in.");
+      // If Supabase has email enumeration protection ON, it won't return an error for existing users.
+      // Instead, it returns a fake user object with an empty `identities` array.
+      // If protection is OFF, it returns an explicit "already registered" error.
+      const userAlreadyExists =
+        (signUpError && signUpError.message.toLowerCase().includes("already registered")) ||
+        (signUpData?.user && signUpData.user.identities && signUpData.user.identities.length === 0);
+
+      // If there's a real sign-up error (e.g. password too weak, signups disabled), show it!
+      if (signUpError && !userAlreadyExists) {
+        throw signUpError;
+      }
+
+      // If the user genuinely didn't exist, sign up succeeded!
+      if (!userAlreadyExists) {
+        if (signUpData?.session) {
+          setMsg("Account created. You're in.");
+        } else {
+          setMsg("Account created! Please check your email to confirm.");
+        }
         return;
       }
 
-      // If the user is already registered or sign-up didn't produce a session,
-      // try signing in with the same credentials.
+      // If we reach here, the user already exists. Fall back to signing in.
       const { error: signInError } = await supabase.auth.signInWithPassword({
         email: trimmed,
         password,
