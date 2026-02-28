@@ -39,11 +39,30 @@ export default function Auth({ supabase }) {
       });
 
       if (signInError) {
+        const lower = signInError.message?.toLowerCase() || "";
+
+        // Handle unconfirmed emails explicitly and resend the confirmation link.
+        if (lower.includes("email not confirmed")) {
+          const { error: resendError } = await supabase.auth.resend({
+            type: "signup",
+            email: trimmed,
+          });
+
+          if (resendError) {
+            throw new Error(
+              "Your email is not confirmed yet. Please use the confirmation link we already sent you."
+            );
+          }
+
+          throw new Error(
+            "Your email is not confirmed yet. We've sent you a new confirmation link."
+          );
+        }
+
         // Normalise common invalid-credentials message
-        const message =
-          signInError.message?.toLowerCase().includes("invalid login credentials")
-            ? "Wrong email or password."
-            : signInError.message;
+        const message = lower.includes("invalid login credentials")
+          ? "Wrong email or password."
+          : signInError.message;
         throw new Error(message || "Auth error");
       }
 
