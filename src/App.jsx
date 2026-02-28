@@ -745,6 +745,71 @@ function SSQTracker({ supabase, session }) {
     );
   }
 
+  function HistoryList({ todos, isDone, C, depth = 0 }) {
+    return (
+      <div>
+        {todos.map(todo => {
+          const done = !todo.isGroup && isDone(todo);
+          const isGroup = todo.isGroup;
+          const key = todo.id;
+          const meta = st.todoMeta?.[key] || {};
+          const isDelayed = !!meta.isDelayed;
+          const completedBy = meta.completedBy || "Unknown";
+          const completedAt = meta.completedAt;
+
+          let dayCompleted = null;
+          if (completedAt) {
+            dayCompleted = Math.floor((completedAt - startAtMidnight.getTime()) / 86400000) + 1;
+          }
+
+          const durMin = meta.durationMs ? Math.floor(meta.durationMs / 60000) : 0;
+          const durSec = meta.durationMs ? Math.floor((meta.durationMs % 60000) / 1000) : 0;
+          const formattedDuration = `${durMin}m ${durSec}s`;
+
+          return (
+            <div key={todo.id} style={{ marginLeft: depth * 14, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ display: "flex", flex: 1, alignItems: "flex-start", gap: 10 }}>
+                {isGroup ? (
+                  <div style={{ width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1, border: `1.5px solid #2a2a2a`, background: "#050505", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#444" }}>G</div>
+                ) : (
+                  <div style={{ width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1, border: `1.5px solid ${done ? "#52D68A" : "#F06449"}`, background: done ? "#52D68A" : "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                    {done && <svg width="9" height="7" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6 8 1" stroke="#080808" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                  </div>
+                )}
+
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, color: done ? "#C8C5BE" : C.text, textDecoration: done ? "none" : (isGroup ? "none" : "line-through") }}>
+                    {todo.label}
+                  </div>
+                  {!isGroup && (
+                    <div style={{ fontSize: 10, color: "#888", marginTop: 4, display: "flex", flexWrap: "wrap", gap: "10px" }}>
+                      {done ? (
+                        <>
+                          <span style={{ color: "#52D68A" }}>Completed</span>
+                          <span>By: {completedBy.split('@')[0]}</span>
+                          <span>Day: {dayCompleted}</span>
+                          <span>Time taken: {formattedDuration}</span>
+                          {isDelayed ? <span style={{ color: "#F06449" }}>Delayed</span> : <span style={{ color: "#52D68A" }}>Within time limit</span>}
+                        </>
+                      ) : (
+                        <span style={{ color: "#F06449" }}>Missed / Not Done</span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {isGroup && todo.children && (
+                <div style={{ marginTop: 4 }}>
+                  <HistoryList todos={todo.children} isDone={isDone} C={C} depth={depth + 1} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <div style={{ fontFamily: "'IBM Plex Mono','Fira Code','Courier New',monospace", minHeight: "100vh", background: C.bg, color: C.text, display: "flex", flexDirection: "column" }}>
       <style>{`
@@ -775,6 +840,7 @@ function SSQTracker({ supabase, session }) {
           { id: "outreach", label: "OUTREACH", hidden: activeIdx < 2 },
           { id: "scoreboard", label: "SCOREBOARD", hidden: activeIdx < 2 },
           { id: "decision", label: "DECISION", hidden: activeIdx < 7 || st.day < 7 },
+          { id: "history", label: "HISTORY", hidden: st.day < 7 },
         ].filter(t => !t.hidden).map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             background: "none", border: "none",
@@ -1232,6 +1298,39 @@ function SSQTracker({ supabase, session }) {
                   value={st.w2hyp}
                   onChange={e => upd({ w2hyp: e.target.value })} />
               </div>
+            </div>
+          )}
+
+          {/* ═══ HISTORY */}
+          {tab === "history" && (
+            <div>
+              <div style={{ marginBottom: 26 }}>
+                <div style={{ fontSize: 30, fontWeight: 700, color: C.textHi, letterSpacing: -0.5, marginBottom: 6, lineHeight: 1 }}>Task History</div>
+                <div style={{ fontSize: 11, color: C.textDim, lineHeight: 1.8 }}>
+                  A full log of all task groups undertaken, which user completed them, and timing details. Includes missed and delayed tasks.
+                </div>
+              </div>
+
+              {flatTaskGroups.map((entry, i) => (
+                <div key={i} style={{ ...card(`${entry.stage.color}22`), marginBottom: 24 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+                    <div>
+                      <span style={{ ...lbl, marginBottom: 4 }}>{entry.stage.label.toUpperCase()} — {entry.group.title}</span>
+                      <div style={{ fontSize: 10, color: "#666" }}>Task group window: Day {entry.group.startDay}{entry.group.endDay !== entry.group.startDay ? `–${entry.group.endDay}` : ""}</div>
+                      {entry.group.requirements && entry.group.requirements.length > 0 && (
+                        <div style={{ fontSize: 10, color: "#E8C547", marginTop: 4 }}>
+                          Requirements: {entry.group.requirements.join(", ")}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <HistoryList
+                    todos={entry.group.todos || []}
+                    isDone={isTodoDone}
+                    C={C}
+                  />
+                </div>
+              ))}
             </div>
           )}
 
