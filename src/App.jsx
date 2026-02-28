@@ -264,6 +264,7 @@ function SSQTracker({ supabase, session }) {
   const [loadingInitial, setLoadingInitial] = useState(true);
   const timer = useRef(null);
   const lastSavedState = useRef(null);
+  const [interactionError, setInteractionError] = useState("");
 
   useEffect(() => {
     let subscription;
@@ -335,6 +336,7 @@ function SSQTracker({ supabase, session }) {
   const activeEntry = flatTaskGroups[activeIdx] || flatTaskGroups[0];
   const activeStage = activeEntry.stage;
   const activeGroup = activeEntry.group;
+  const activeGroupDelayed = groupHasDelay(activeGroup);
 
   const countTodos = (todos) => {
     return todos.reduce((acc, t) => {
@@ -372,6 +374,25 @@ function SSQTracker({ supabase, session }) {
     return Math.round(groupDoneCount(group) / total * 100);
   };
 
+  const groupHasDelay = (group) => {
+    const meta = st.todoMeta || {};
+    let delayed = false;
+    const walk = (todos) => {
+      todos.forEach(t => {
+        if (t.isGroup && t.children) {
+          walk(t.children);
+        } else {
+          const key = `${t.id}`;
+          if (meta[key]?.isDelayed) {
+            delayed = true;
+          }
+        }
+      });
+    };
+    walk(group.todos || []);
+    return delayed;
+  };
+
   const allDone = flatTaskGroups.reduce((sum, e) => sum + groupDoneCount(e.group), 0);
   const allTotal = flatTaskGroups.reduce((sum, e) => sum + groupTotalCount(e.group), 0);
   const weekPct = allTotal ? Math.round(allDone / allTotal * 100) : 0;
@@ -381,16 +402,58 @@ function SSQTracker({ supabase, session }) {
 
   const upd = patch => setSt(p => ({ ...p, ...patch }));
   const stStr = JSON.stringify(st); // stable reference for effect
-
-  const togTodo = (todo) => {
+  const togTodo = (todo, context = {}) => {
     const key = `${todo.id}`;
-    setSt(p => ({
-      ...p,
-      checkedTodos: {
+    const myEmail = session?.user?.email || null;
+
+    setSt(p => {
+      const prevChecked = !!p.checkedTodos?.[key];
+      const nextChecked = !prevChecked;
+
+      const nextCheckedTodos = {
         ...(p.checkedTodos || {}),
-        [key]: !p.checkedTodos?.[key],
+        [key]: nextChecked,
+      };
+
+      // If unchecking, just flip the boolean and keep any existing metadata.
+      if (!nextChecked) {
+        return {
+          ...p,
+          checkedTodos: nextCheckedTodos,
+        };
       }
-    }));
+
+      const lockedInfo = p.lockedTodos?.[key] || {};
+      const startedAt = lockedInfo.lockedAt || context.lockedAt || Date.now();
+      const completedAt = Date.now();
+      const completedBy =
+        myEmail ||
+        context.lockedByEmail ||
+        lockedInfo.lockedBy ||
+        p.todoMeta?.[key]?.completedBy ||
+        null;
+
+      const durationMs = completedAt - startedAt;
+      const prevMeta = p.todoMeta || {};
+      const existingMeta = prevMeta[key] || {};
+      const isDelayed = context.isDelayed ?? existingMeta.isDelayed ?? false;
+
+      return {
+        ...p,
+        checkedTodos: nextCheckedTodos,
+        todoMeta: {
+          ...prevMeta,
+          [key]: {
+            ...existingMeta,
+            startedAt,
+            completedAt,
+            completedBy,
+            durationMs,
+            isDelayed,
+          },
+        },
+      };
+    });
   };
 
   const setM = (day, key, val) => setSt(p => ({
@@ -471,13 +534,15 @@ function SSQTracker({ supabase, session }) {
     );
   }
   // Helper component rendered inline for task trees with locking + timers
-  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0 }) {
+  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0, onInteractionError }) {
     return (
       <div>
         {todos.map(todo => {
           const done = !todo.isGroup && isDone(todo);
           const isGroup = todo.isGroup;
           const key = todo.id;
+          const meta = st.todoMeta?.[key];
+          const isDelayed = !!meta?.isDelayed;
           const locked = !!st.lockedTodos?.[key];
           const lockedAt = st.lockedTodos?.[key]?.lockedAt;
           const minutes = todo.minutes || 0;
@@ -488,12 +553,25 @@ function SSQTracker({ supabase, session }) {
 
           const myEmail = session?.user?.email;
           const lockedByEmail = st.lockedTodos?.[key]?.lockedBy;
-          const isLockedByMe = locked && lockedByEmail === myEmail;
-          // Support legacy lockedTodos without a lockedBy email by prioritizing myEmail (assume my old lock if missing email) or just treat missing email as not mine if we want.
-          const isLockedByOther = locked && lockedByEmail && lockedByEmail !== myEmail;
+          const isLockedByMe = locked && (lockedByEmail ? lockedByEmail === myEmail : true);
+          // Support legacy lockedTodos without a lockedBy email by prioritizing myEmail (assume my old lock if missing email).
+          const isLockedByOther = locked && !!lockedByEmail && lockedByEmail !== myEmail;
 
           const toggleLock = () => {
-            if (isLockedByOther) return;
+            if (isLockedByOther) {
+              if (onInteractionError) {
+                if (lockedByEmail) {
+                  onInteractionError(`This task is already in progress by ${lockedByEmail.split('@')[0]}.`);
+                } else {
+                  onInteractionError("This task is already in progress by someone else.");
+                }
+              }
+              return;
+            }
+
+            if (onInteractionError) {
+              onInteractionError("");
+            }
 
             setSt(p => {
               const existing = p.lockedTodos || {};
@@ -521,7 +599,27 @@ function SSQTracker({ supabase, session }) {
               <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
                 {!isGroup && (
                   <button
-                    onClick={() => onToggle(todo)}
+                    onClick={() => {
+                      if (!isLockedByMe) {
+                        if (!locked) {
+                          onInteractionError && onInteractionError("Start this task before marking it done.");
+                        } else if (isLockedByOther) {
+                          const who = lockedByEmail ? lockedByEmail.split("@")[0] : "someone else";
+                          onInteractionError && onInteractionError(`Only ${who} can complete this task.`);
+                        } else {
+                          onInteractionError && onInteractionError("Only the person who started this task can complete it.");
+                        }
+                        return;
+                      }
+
+                      onInteractionError && onInteractionError("");
+                      const isPastDeadline = st.day > activeGroup.endDay;
+                      onToggle(todo, {
+                        lockedAt,
+                        lockedByEmail,
+                        isDelayed: isPastDeadline || isDelayed,
+                      });
+                    }}
                     style={{
                       width: 17,
                       height: 17,
@@ -578,12 +676,13 @@ function SSQTracker({ supabase, session }) {
                       }}
                     >
                       {todo.label}
+                      {isDelayed && " (Delayed)"}
                     </span>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                       {minutes > 0 && !isGroup && (
                         <span style={{ fontSize: 9, color: "#444" }}>{minutes}m</span>
                       )}
-                      {!isGroup && (
+                      {!isGroup && !done && (
                         <button
                           onClick={toggleLock}
                           disabled={isLockedByOther}
@@ -623,6 +722,7 @@ function SSQTracker({ supabase, session }) {
                     accentColor={accentColor}
                     C={C}
                     depth={depth + 1}
+                    onInteractionError={onInteractionError}
                   />
                 </div>
               )}
@@ -732,6 +832,11 @@ function SSQTracker({ supabase, session }) {
                   <div style={{ fontSize: 10, color: "#444", letterSpacing: .5 }}>
                     Task group window: Day {activeGroup.startDay}{activeGroup.endDay !== activeGroup.startDay ? `–${activeGroup.endDay}` : ""}
                   </div>
+                  {activeGroupDelayed && (
+                    <div style={{ fontSize: 10, color: "#F06449", marginTop: 4, letterSpacing: .5 }}>
+                      This group has delayed tasks.
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ position: "relative", width: 48, height: 48, flexShrink: 0 }}>
@@ -768,6 +873,11 @@ function SSQTracker({ supabase, session }) {
                   <span style={{ fontSize: 11, color: "#888" }}>{l.msg}</span>
                 </div>
               ))}
+              {interactionError && (
+                <div style={{ padding: "9px 14px", background: "#1a0c0a", border: "1px solid #F0644944", borderRadius: 6, marginBottom: 10, fontSize: 11, color: "#F06449" }}>
+                  {interactionError}
+                </div>
+              )}
 
               {/* Tasks */}
               <div style={card(`${activeStage.color}22`)}>
@@ -783,6 +893,7 @@ function SSQTracker({ supabase, session }) {
                   isDone={isTodoDone}
                   accentColor={activeStage.color}
                   C={C}
+                  onInteractionError={setInteractionError}
                 />
               </div>
 
