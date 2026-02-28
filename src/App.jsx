@@ -539,36 +539,71 @@ function SSQTracker({ supabase, session }) {
     );
   }
   // Helper component rendered inline for task trees with locking + timers
-  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0, onInteractionError }) {
+  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0, onInteractionError, inheritedLockEmail, prevTasksDone = true }) {
+
+    // 1. Group-level locking: Check if ANY task in this current array (or sub-arrays) is locked.
+    // That lock applies to the *entire* list of todos on this level and below.
+    const findGroupLock = (list) => {
+      for (const t of list) {
+        if (st.lockedTodos?.[t.id]?.lockedBy) return st.lockedTodos[t.id].lockedBy;
+        if (t.isGroup && t.children) {
+          const childLock = findGroupLock(t.children);
+          if (childLock) return childLock;
+        }
+      }
+      return null;
+    };
+
+    // The group is locked to whoever started any task inside it.
+    const thisGroupLockEmail = findGroupLock(todos) || inheritedLockEmail;
+
+    // We will keep a running tally of "are all previous siblings done?"
+    let allPreviousSiblingsDone = prevTasksDone;
+
     return (
       <div>
-        {todos.map(todo => {
+        {todos.map((todo, idx) => {
           const done = !todo.isGroup && isDone(todo);
+          // If it's a group, checking if all its children are done
+          const isGroupFullyDone = todo.isGroup ? groupPct(todo) === 100 : done;
+
           const isGroup = todo.isGroup;
           const key = todo.id;
           const meta = st.todoMeta?.[key];
           const isDelayed = !!meta?.isDelayed;
-          const locked = !!st.lockedTodos?.[key];
-          const lockedAt = st.lockedTodos?.[key]?.lockedAt;
+
+          // An individual todo is locked either explicitly, or implicitly by the group lock.
+          const explicitLock = st.lockedTodos?.[key];
+          const lockedByEmail = explicitLock?.lockedBy || thisGroupLockEmail;
+          const locked = !!lockedByEmail;
+          const lockedAt = explicitLock?.lockedAt || (locked ? Date.now() : null); // fallback if implicitly locked
+
           const minutes = todo.minutes || 0;
           const deadlineMs = minutes * 60 * 1000;
-          const remainingMs = locked && lockedAt ? Math.max(0, lockedAt + deadlineMs - now) : null;
+          const remainingMs = locked && explicitLock?.lockedAt ? Math.max(0, explicitLock.lockedAt + deadlineMs - now) : null;
           const remainingMin = remainingMs != null ? Math.floor(remainingMs / 60000) : null;
           const remainingSec = remainingMs != null ? Math.floor((remainingMs % 60000) / 1000) : null;
 
           const myEmail = session?.user?.email;
-          const lockedByEmail = st.lockedTodos?.[key]?.lockedBy;
-          const isLockedByMe = locked && (lockedByEmail ? lockedByEmail === myEmail : true);
+          const isLockedByMe = locked && (lockedByEmail === myEmail);
+
+          // Sequential Block Logic: This task is blocked if previous siblings are NOT done.
+          const sequentialBlocked = !allPreviousSiblingsDone;
+
+          // After processing this todo, update the running tally for the NEXT sibling in the map.
+          allPreviousSiblingsDone = allPreviousSiblingsDone && isGroupFullyDone;
           // Support legacy lockedTodos without a lockedBy email by prioritizing myEmail (assume my old lock if missing email).
-          const isLockedByOther = locked && !!lockedByEmail && lockedByEmail !== myEmail;
+          const isLockedByOther = !!lockedByEmail && lockedByEmail !== myEmail;
 
           const toggleLock = () => {
-            if (isLockedByOther) {
+            if (isLockedByOther || sequentialBlocked) {
               if (onInteractionError) {
-                if (lockedByEmail) {
-                  onInteractionError(`This task is already in progress by ${lockedByEmail.split('@')[0]}.`);
+                if (sequentialBlocked) {
+                  onInteractionError("Please complete the previous task first.");
+                } else if (lockedByEmail) {
+                  onInteractionError(`This entire task group is in progress by ${lockedByEmail.split('@')[0]}.`);
                 } else {
-                  onInteractionError("This task is already in progress by someone else.");
+                  onInteractionError("This task group is in progress by someone else.");
                 }
               }
               return;
@@ -580,6 +615,10 @@ function SSQTracker({ supabase, session }) {
 
             setSt(p => {
               const existing = p.lockedTodos || {};
+              // For group locking locking, if the user starts the first task, all tasks in this group should logically derive from that lock or we just lock the parent context. 
+              // A simpler way: just lock THIS specific todo, but the `groupLockEmail` prop passed down from the parent group will enforce uniform visual locking.
+              // To ensure the actual lock logic covers the whole group, we can set a lock on the `groupId` instead, BUT our state is keyed by todo id.
+              // Instead, we just lock this specific todo, and the parent `TaskList` calculates the `groupLockEmail` by scanning all siblings.
 
               if (existing[key] && existing[key].lockedBy === myEmail) {
                 const copy = { ...existing };
@@ -605,6 +644,11 @@ function SSQTracker({ supabase, session }) {
                 {!isGroup && (
                   <button
                     onClick={() => {
+                      if (sequentialBlocked) {
+                        onInteractionError && onInteractionError("Complete the previous task first.");
+                        return;
+                      }
+
                       if (!isLockedByMe) {
                         if (!locked) {
                           onInteractionError && onInteractionError("Start this task before marking it done.");
@@ -735,6 +779,9 @@ function SSQTracker({ supabase, session }) {
                     C={C}
                     depth={depth + 1}
                     onInteractionError={onInteractionError}
+                    inheritedLockEmail={thisGroupLockEmail}
+                    // For children, if the parent is blocked sequentially, the children are too.
+                    prevTasksDone={!sequentialBlocked}
                   />
                 </div>
               )}
