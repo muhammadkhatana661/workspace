@@ -772,8 +772,9 @@ function SSQTracker({ supabase, session }) {
         {[
           { id: "today", label: "TODAY" },
           { id: "hypothesis", label: "HYPOTHESIS" },
-          { id: "scoreboard", label: "SCOREBOARD", hidden: !hypLocked },
-          { id: "decision", label: "DECISION", hidden: !hypLocked || st.day < 7 },
+          { id: "outreach", label: "OUTREACH", hidden: activeIdx < 2 },
+          { id: "scoreboard", label: "SCOREBOARD", hidden: activeIdx < 2 },
+          { id: "decision", label: "DECISION", hidden: activeIdx < 7 || st.day < 7 },
         ].filter(t => !t.hidden).map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             background: "none", border: "none",
@@ -826,6 +827,9 @@ function SSQTracker({ supabase, session }) {
                   <div style={{ fontSize: 12, color: activeStage.color, marginBottom: 4 }}>{activeGroup.title}</div>
                   <div style={{ fontSize: 10, color: "#444", letterSpacing: .5 }}>
                     Task group window: Day {activeGroup.startDay}{activeGroup.endDay !== activeGroup.startDay ? `–${activeGroup.endDay}` : ""}
+                  </div>
+                  <div style={{ fontSize: 10, color: "#E8C547", marginTop: 4, letterSpacing: .5 }}>
+                    Requirements: {activeGroup.requirements && activeGroup.requirements.length > 0 ? activeGroup.requirements.join(", ") : "no special requirements"}
                   </div>
                   {activeGroupDelayed && (
                     <div style={{ fontSize: 10, color: "#F06449", marginTop: 4, letterSpacing: .5 }}>
@@ -1003,6 +1007,18 @@ function SSQTracker({ supabase, session }) {
                     <span style={{ fontSize: 9, color: "#52D68A", letterSpacing: 2 }}>HYPOTHESIS LOCKED AND FROZEN</span>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* ═══ OUTREACH */}
+          {tab === "outreach" && (
+            <div>
+              <div style={{ marginBottom: 26 }}>
+                <div style={{ fontSize: 30, fontWeight: 700, color: C.textHi, letterSpacing: -0.5, marginBottom: 6, lineHeight: 1 }}>Outreach</div>
+                <div style={{ fontSize: 11, color: C.textDim, lineHeight: 1.8 }}>
+                  No content right now.
+                </div>
               </div>
             </div>
           )}
