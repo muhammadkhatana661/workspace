@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 
 export default function Auth({ supabase }) {
-  const [mode, setMode] = useState("signin"); // signin | signup
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -18,22 +17,37 @@ export default function Auth({ supabase }) {
     setMsg("");
     setBusy(true);
     try {
-      if (mode === "signin") {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
-          password,
-        });
-        if (error) throw error;
-        setMsg("Signed in.");
-      } else {
-        const { error } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-        });
-        if (error) throw error;
-        setMsg("Account created. You can sign in now.");
-        setMode("signin");
+      const trimmed = email.trim();
+
+      // First, attempt to sign up. If the user already exists, Supabase will
+      // return an error we can safely ignore and fall back to sign-in.
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+        email: trimmed,
+        password,
+      });
+
+      if (!signUpError && signUpData?.session) {
+        setMsg("Account created. You're in.");
+        return;
       }
+
+      // If the user is already registered or sign-up didn't produce a session,
+      // try signing in with the same credentials.
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: trimmed,
+        password,
+      });
+
+      if (signInError) {
+        // Normalise common invalid-credentials message
+        const message =
+          signInError.message?.toLowerCase().includes("invalid login credentials")
+            ? "Wrong email or password."
+            : signInError.message;
+        throw new Error(message || "Auth error");
+      }
+
+      setMsg("Signed in.");
     } catch (e2) {
       setErr(e2?.message || "Auth error");
     } finally {
@@ -110,29 +124,8 @@ export default function Auth({ supabase }) {
       <div style={card}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginBottom: 14 }}>
           <div style={{ fontSize: 18, fontWeight: 700, color: C.textHi, letterSpacing: -0.5 }}>
-            {mode === "signin" ? "Sign in" : "Create account"}
+            Continue
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setErr("");
-              setMsg("");
-              setMode(m => (m === "signin" ? "signup" : "signin"));
-            }}
-            style={{
-              background: "transparent",
-              border: `1px solid ${C.border2}`,
-              borderRadius: 6,
-              padding: "6px 10px",
-              fontSize: 10,
-              letterSpacing: 1,
-              color: "#777",
-              cursor: "pointer",
-              textTransform: "uppercase",
-            }}
-          >
-            {mode === "signin" ? "Sign up" : "Sign in"}
-          </button>
         </div>
 
         <div style={{ fontSize: 11, color: "#666", lineHeight: 1.7, marginBottom: 16 }}>
@@ -146,7 +139,7 @@ export default function Auth({ supabase }) {
           </div>
           <div>
             <div style={{ fontSize: 9, letterSpacing: 3, color: C.textDim, marginBottom: 6, textTransform: "uppercase" }}>Password</div>
-            <input value={password} onChange={e => setPassword(e.target.value)} style={input} type="password" autoComplete={mode === "signin" ? "current-password" : "new-password"} />
+            <input value={password} onChange={e => setPassword(e.target.value)} style={input} type="password" autoComplete="current-password" />
           </div>
 
           {err && (
@@ -161,7 +154,7 @@ export default function Auth({ supabase }) {
           )}
 
           <button type="submit" disabled={!canSubmit} style={btn}>
-            {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Sign up"}
+            {busy ? "Please wait…" : "Continue"}
           </button>
         </form>
       </div>

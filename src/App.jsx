@@ -800,24 +800,7 @@ function SSQTracker({ supabase, session }) {
             <span style={{ fontSize: 10, fontWeight: 700, color: activeStage.color }}>{weekPct}%</span>
           </div>
 
-          {supabase && (
-            <button
-              onClick={() => supabase.auth.signOut()}
-              title={session?.user?.email || "Sign out"}
-              style={{
-                background: "transparent",
-                border: `1px solid ${C.border2}`,
-                borderRadius: 4,
-                padding: "5px 10px",
-                color: "#666",
-                fontSize: 9,
-                letterSpacing: 2,
-                textTransform: "uppercase",
-              }}
-            >
-              Sign out
-            </button>
-          )}
+          {/* Users stay signed in; no explicit sign-out button */}
         </div>
       </div>
 
