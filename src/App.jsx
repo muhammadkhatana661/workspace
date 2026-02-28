@@ -336,7 +336,6 @@ function SSQTracker({ supabase, session }) {
   const activeEntry = flatTaskGroups[activeIdx] || flatTaskGroups[0];
   const activeStage = activeEntry.stage;
   const activeGroup = activeEntry.group;
-  const activeGroupDelayed = groupHasDelay(activeGroup);
 
   const countTodos = (todos) => {
     return todos.reduce((acc, t) => {
@@ -376,6 +375,10 @@ function SSQTracker({ supabase, session }) {
 
   const groupHasDelay = (group) => {
     const meta = st.todoMeta || {};
+    // If we're past this group's deadline and it's not fully complete, treat it as delayed.
+    if (st.day > group.endDay && groupPct(group) < 100) {
+      return true;
+    }
     let delayed = false;
     const walk = (todos) => {
       todos.forEach(t => {
@@ -392,6 +395,8 @@ function SSQTracker({ supabase, session }) {
     walk(group.todos || []);
     return delayed;
   };
+
+  const activeGroupDelayed = groupHasDelay(activeGroup);
 
   const allDone = flatTaskGroups.reduce((sum, e) => sum + groupDoneCount(e.group), 0);
   const allTotal = flatTaskGroups.reduce((sum, e) => sum + groupTotalCount(e.group), 0);
@@ -613,11 +618,18 @@ function SSQTracker({ supabase, session }) {
                       }
 
                       onInteractionError && onInteractionError("");
-                      const isPastDeadline = st.day > activeGroup.endDay;
+                      const nowTs = Date.now();
+                      let isTodoDelayed = !!isDelayed;
+                      if (!isTodoDelayed && minutes > 0 && lockedAt) {
+                        const todoDeadline = lockedAt + minutes * 60 * 1000;
+                        if (nowTs > todoDeadline) {
+                          isTodoDelayed = true;
+                        }
+                      }
                       onToggle(todo, {
                         lockedAt,
                         lockedByEmail,
-                        isDelayed: isPastDeadline || isDelayed,
+                        isDelayed: isTodoDelayed,
                       });
                     }}
                     style={{
@@ -834,7 +846,7 @@ function SSQTracker({ supabase, session }) {
                   </div>
                   {activeGroupDelayed && (
                     <div style={{ fontSize: 10, color: "#F06449", marginTop: 4, letterSpacing: .5 }}>
-                      This group has delayed tasks.
+                      This task group is delayed.
                     </div>
                   )}
                 </div>
