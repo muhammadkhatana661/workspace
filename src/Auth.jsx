@@ -178,7 +178,6 @@ export default function Auth({ supabase }) {
             <div style={{ fontSize: 9, letterSpacing: 3, color: C.textDim, marginBottom: 6, textTransform: "uppercase" }}>Password</div>
             <input value={password} onChange={e => setPassword(e.target.value)} style={input} type="password" autoComplete="current-password" />
           </div>
-
           {err && (
             <div style={{ padding: "10px 12px", background: "#1a0c0a", border: "1px solid #F0644944", borderRadius: 6, color: "#F06449", fontSize: 11, lineHeight: 1.6 }}>
               {err}

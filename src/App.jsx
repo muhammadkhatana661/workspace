@@ -1,18 +1,156 @@
-import { useState, useEffect, useRef } from "react";
+/**
+ * ════════════════════════════════════════════════════════════════════
+ *  SSQ TRACKER — App.jsx
+ *  Rewritten to store todo data as individual rows in Supabase tables
+ *  instead of a single JSON blob in `app_state`.
+ * ════════════════════════════════════════════════════════════════════
+ *
+ * DATABASE SCHEMA REQUIRED
+ * ────────────────────────
+ *  Table: app_state
+ *    id           integer   primary key (single row, id = 1)
+ *    data         jsonb     (stores non-todo state: hyp, metrics, verdict, etc.)
+ *
+ *  Table: todo_items          ← NEW: replaces checkedTodos / todoMeta / lockedTodos blobs
+ *    id           text        primary key  (matches the todo id from TASK_STAGES)
+ *    checked      boolean     default false
+ *    locked_by    text        nullable (user email)
+ *    locked_at    bigint      nullable (epoch ms)
+ *    started_at   bigint      nullable
+ *    completed_at bigint      nullable
+ *    completed_by text        nullable
+ *    duration_ms  bigint      nullable
+ *    is_delayed   boolean     default false
+ *
+ * ════════════════════════════════════════════════════════════════════
+ *
+ * CONDITIONAL COMPONENTS MAP
+ * ──────────────────────────
+ * The following components/elements are rendered only when a specific
+ * condition is true. Format: [Condition] → Component → Where it appears
+ *
+ *  1. [loadingInitial === true]
+ *     → Full-screen "Loading SSQ Tracker State..." div
+ *     → Replaces entire app output (early return)
+ *
+ * TODAY TAB LAYOUT (two explicit sections):
+ * ─────────────────────────────────────────
+ *  SECTION B — TASK GROUPS  (always visible, rendered first)
+ *    The active task group card + linear group navigation.
+ *    Always rendered while on the today tab regardless of day.
+ *
+ *  SECTION A — DAY-CONDITIONAL ALERTS & PANELS  (rendered below task groups)
+ *    Conditions 3, 4, 5, 6 below all live here. They mount/unmount as the
+ *    day or runtime state changes. Placed after task groups so the primary
+ *    work surface is always at the top of the page.
+ *
+ *  2. [tab === "today"]
+ *     → Entire TODAY panel (page header, SECTION A, SECTION B)
+ *     → Main content area
+ *
+ *  3. [tab === "today" && !hypLocked && st.day >= 2]  — SECTION A
+ *     → Yellow warning banner "Hypothesis not locked yet"
+ *     → Top of SECTION A, above all other conditional content
+ *
+ *  4. [tab === "today" && hotLeaks.length > 0]  — SECTION A
+ *     → One leak warning row per active leak (VOLUME / MESSAGE / FOLLOWUP / CALL)
+ *     → SECTION A, below the hypothesis warning
+ *
+ *  5. [tab === "today" && interactionError !== ""]  — SECTION A
+ *     → Red error banner with the interaction error message
+ *     → SECTION A, below the leak warnings
+ *
+ *  6. [tab === "today" && st.day >= 2 && st.day <= 6]
+ *     → "LOG TODAY'S NUMBERS" metric input card (Attempts / Replies / Shows / Closes / Revenue)
+ *     → Inside TODAY panel, in SECTION A (day-conditional), above the task groups
+ *     → Hidden on Day 1 (no outreach yet) and Day 7 (Decision Day focus)
+ *
+ *  7. [tab === "today" && activeGroup.requirements?.length > 0]
+ *     → Requirements label row ("Requirements: …")
+ *     → Inside TODAY panel page header, under the task-group window label
+ *
+ *  8. [tab === "today" && activeGroupDelayed]
+ *     → "This task group is delayed." label in red
+ *     → Inside TODAY panel page header, under requirements
+ *
+ *  9. [tab === "hypothesis"]
+ *     → HYPOTHESIS panel (WHO / PRICE / PAIN / OUTCOME fields, assembled hypothesis)
+ *     → Main content area
+ *
+ * 10. [tab === "hypothesis" && hypLocked]
+ *     → Green "HYPOTHESIS LOCKED AND FROZEN" status row
+ *     → Bottom of the assembled hypothesis card
+ *
+ * 11. [tab === "outreach"]
+ *     → OUTREACH panel (currently a placeholder)
+ *     → Main content area
+ *
+ * 12. [tab === "scoreboard"]
+ *     → SCOREBOARD panel (summary stat cards, day-by-day table, leak grid)
+ *     → Main content area
+ *
+ * 13. [tab === "decision"]
+ *     → DECISION DAY panel (week summary, leak sentence, verdict, week-2 hypothesis)
+ *     → Main content area
+ *
+ * 14. [tab === "decision" && st.day < 7]
+ *     → Orange "Decision Day is Day 7. You're on Day X." warning banner
+ *     → Top of DECISION panel, below the intro text
+ *
+ * 15. [tab === "decision" && st.verdict === "pivot"]
+ *     → Yellow PIVOT block: variable selector + "change one variable" instructions
+ *     → Inside Verdict card, below the three verdict buttons
+ *
+ * 16. [tab === "decision" && st.verdict === "scale"]
+ *     → Green SCALE PROTOCOL block with 4 checklist items
+ *     → Inside Verdict card, below the three verdict buttons
+ *
+ * 17. [tab === "history"]
+ *     → HISTORY panel (HistoryList for every flat task group)
+ *     → Main content area
+ *
+ * 18. [hotLeaks.length > 0]  (not tab-gated)
+ *     → Red "N LEAKS DETECTED" badge in the top nav bar right section
+ *     → Top navigation bar, left of the week-progress bar
+ *
+ * 19. [Inside TaskList, per todo: !isGroup && !done]
+ *     → "Start / Working / By X" lock button
+ *     → Right side of each undone leaf-todo row inside any TaskList
+ *
+ * 20. [Inside TaskList, per todo: done (checkmark)]
+ *     → SVG checkmark inside the checkbox button
+ *     → Checkbox of any completed leaf-todo
+ *
+ * 21. [Inside TaskList, per todo: !isGroup && leafLockedAt && remainingMs != null]
+ *     → Live countdown timer ("Time left: Xm XXs" or "Deadline passed")
+ *     → Below the label of a locked leaf-todo that has a timer
+ *
+ * 22. [Inside TaskList, per todo: !isGroup && todo.detail && isLeafLockedByMe && !done]
+ *     → Detail hint block (styled bordered tip)
+ *     → Below the timer line of the active leaf-todo the current user locked
+ *
+ * 23. [Inside TaskList, per group: isGroup && groupActiveLockEmail && !isGroupFullyDone]
+ *     → "Working / By X" badge on the group header row
+ *     → Right side of a group-todo header row
+ *
+ * 24. [Inside TaskList, per group: isGroup && children]
+ *     → Recursive child TaskList (with enforceSequential = true)
+ *     → Indented below the group-header row
+ *
+ * 25. [Inside HistoryList, per leaf: done]
+ *     → "Completed / By / Day / Time taken / Delayed?" meta row
+ *     → Below the label in any completed leaf row in the HISTORY panel
+ *
+ * 26. [Inside HistoryList, per leaf: !done]
+ *     → "Missed / Not Done" red label
+ *     → Below the label in any uncompleted leaf row in the HISTORY panel
+ *
+ * ════════════════════════════════════════════════════════════════════
+ */
+
+import { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
-
-// Task configuration is deliberately simple and declarative so an admin can
-// customize tomorrow's flow just by editing this array.
-//
-// Concepts:
-// - Stage         → High level bucket ("Hypothesis", "Outreach", etc.)
-// - Task Group    → A unit of work with its own deadline window in days
-// - Todo / Group  → Leaf todo item or a nested todo group (tree structure)
-//   - When `isGroup` is true, `children` contains its sub‑todos/groups.
-//   - Todo groups themselves do NOT have timers — only leaf todos do.
-//
-// Day ranges are relative to the existing `startDate` logic (Day 1..7).
 
 const TASK_STAGES = [
   {
@@ -26,45 +164,19 @@ const TASK_STAGES = [
       {
         id: "hypothesis-1",
         title: "Lock your hypothesis",
-        // Must be completed on Day 1
         startDay: 1,
         endDay: 1,
         todos: [
-          {
-            id: "hypo-who",
-            label: "Define WHO — industry + role + location in one sentence",
-            isGroup: false,
-            minutes: 20,
-          },
-          {
-            id: "hypo-pain",
-            label: "Define PAIN — what frustrates them every single day?",
-            isGroup: false,
-            minutes: 20,
-          },
-          {
-            id: "hypo-outcome",
-            label: "Define OUTCOME — what is measurably different after 7 days?",
-            isGroup: false,
-            minutes: 20,
-          },
+          { id: "hypo-who", label: "Define WHO — industry + role + location in one sentence", isGroup: false, minutes: 20 },
+          { id: "hypo-pain", label: "Define PAIN — what frustrates them every single day?", isGroup: false, minutes: 20 },
+          { id: "hypo-outcome", label: "Define OUTCOME — what is measurably different after 7 days?", isGroup: false, minutes: 20 },
           {
             id: "hypo-price-group",
             label: "Price + final hypothesis statement",
             isGroup: true,
             children: [
-              {
-                id: "hypo-price",
-                label: "Set PRICE — commit to one number, no ranges",
-                isGroup: false,
-                minutes: 10,
-              },
-              {
-                id: "hypo-statement",
-                label: "Write the full hypothesis statement and freeze it",
-                isGroup: false,
-                minutes: 15,
-              },
+              { id: "hypo-price", label: "Set PRICE — commit to one number, no ranges", isGroup: false, minutes: 10 },
+              { id: "hypo-statement", label: "Write the full hypothesis statement and freeze it", isGroup: false, minutes: 15 },
             ],
           },
         ],
@@ -76,7 +188,6 @@ const TASK_STAGES = [
     label: "Getting Prerequisites ready",
     color: "#5B9CF6",
     dim: "#0d1a30",
-    // Spans Day 1–2
     startDay: 1,
     endDay: 2,
     taskGroups: [
@@ -86,43 +197,18 @@ const TASK_STAGES = [
         startDay: 1,
         endDay: 2,
         todos: [
-          {
-            id: "prereq-offer-doc",
-            label: "Build one-page offer doc",
-            isGroup: false,
-            minutes: 25,
-          },
+          { id: "prereq-offer-doc", label: "Build one-page offer doc", isGroup: false, minutes: 25 },
           {
             id: "prereq-links",
             label: "Booking + payment + outreach system",
             isGroup: true,
             children: [
-              {
-                id: "prereq-booking",
-                label: "Set up booking link (Calendly or similar)",
-                isGroup: false,
-                minutes: 10,
-              },
-              {
-                id: "prereq-payment",
-                label: "Create payment link (Stripe or similar)",
-                isGroup: false,
-                minutes: 10,
-              },
-              {
-                id: "prereq-outreach-msg",
-                label: "Write outreach message for primary channel",
-                isGroup: false,
-                minutes: 20,
-              },
+              { id: "prereq-booking", label: "Set up booking link (Calendly or similar)", isGroup: false, minutes: 10 },
+              { id: "prereq-payment", label: "Create payment link (Stripe or similar)", isGroup: false, minutes: 10 },
+              { id: "prereq-outreach-msg", label: "Write outreach message for primary channel", isGroup: false, minutes: 20 },
             ],
           },
-          {
-            id: "prereq-leads",
-            label: "Map 30+ leads",
-            isGroup: false,
-            minutes: 30,
-          },
+          { id: "prereq-leads", label: "Map 30+ leads", isGroup: false, minutes: 30 },
         ],
       },
     ],
@@ -132,7 +218,6 @@ const TASK_STAGES = [
     label: "Outreach",
     color: "#52D68A",
     dim: "#0a1f14",
-    // Outreach spans Days 2–6; we assign a task group on each day.
     startDay: 2,
     endDay: 6,
     taskGroups: [
@@ -237,22 +322,46 @@ function sumField(metricsObj, key) {
   return Object.values(metricsObj).reduce((s, v) => s + (parseFloat(v[key]) || 0), 0);
 }
 
-// ─── STORAGE ─────────────────────────────────────────────────────────────────
+// ─── INITIAL STATE ───────────────────────────────────────────────────────────
 
-function getEmptyState() {
+function getEmptyAppState() {
+  // startDate is always set to today-at-midnight so currentDay always begins at 1.
+  // When the DB row already has a startDate it will be merged in during loadData(),
+  // preserving the existing week progress. This default only applies on a fresh run
+  // before the first DB load completes, and when the DB has no prior data at all.
+  const todayMidnight = new Date();
+  todayMidnight.setHours(0, 0, 0, 0);
   return {
-    startDate: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
-    checkedTodos: {},
-    lockedTodos: {},
-    todoMeta: {},
+    startDate: todayMidnight.toISOString(),
     activeTaskIndex: 0,
-    metrics: Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map(d => [d, { attempts: "", replies: "", shows: "", closes: "", revenue: "" }])),
+    metrics: Object.fromEntries(
+      [1, 2, 3, 4, 5, 6, 7].map(d => [d, { attempts: "", replies: "", shows: "", closes: "", revenue: "" }])
+    ),
     hyp: { who: "", pain: "", outcome: "", price: "", channel: "" },
     leak: "",
     verdict: "",
     pivotVar: "",
     w2hyp: "",
   };
+}
+
+// ─── todoItems: flat map of id → row (matches DB schema) ─────────────────────
+//
+//  {
+//    [todoId]: {
+//      checked: boolean,
+//      locked_by: string | null,
+//      locked_at: number | null,       ← epoch ms
+//      started_at: number | null,
+//      completed_at: number | null,
+//      completed_by: string | null,
+//      duration_ms: number | null,
+//      is_delayed: boolean,
+//    }
+//  }
+
+function getEmptyTodoItems() {
+  return {};
 }
 
 // ─── APP ──────────────────────────────────────────────────────────────────────
@@ -262,71 +371,104 @@ export default function App({ supabase, session }) {
 }
 
 function SSQTracker({ supabase, session }) {
-  const [rawSt, setSt] = useState(getEmptyState);
+  // Non-todo state (hypothesis, metrics, verdict, etc.)
+  const [appState, setAppState] = useState(getEmptyAppState);
+  // Per-todo state (one entry per leaf todo id)
+  const [todoItems, setTodoItems] = useState(getEmptyTodoItems);
+
   const [tab, setTab] = useState("today");
   const [loadingInitial, setLoadingInitial] = useState(true);
   const [interactionError, setInteractionError] = useState("");
 
-  // ── Sync state machine ──────────────────────────────────────────────────
-  // We never fire a new save while one is already in-flight. Instead we keep
-  // the latest state that needs pushing in `pendingRef`. When a save finishes
-  // we immediately push the pending snapshot if one exists, draining the queue.
-  //
-  //  saveStatusRef: "idle" | "saving"
-  //    idle   — nothing running
-  //    saving — a fetch() is in-flight; any new change is stored in pendingRef
-  //
-  // `lastSavedRef` holds the JSON of the last snapshot written to the DB.
-  // Used to suppress realtime echoes of our own writes.
-  const saveStatusRef = useRef("idle");
-  const [saveIndicator, setSaveIndicator] = useState("saved"); // "saved"|"saving"|"unsaved"
-  const pendingRef = useRef(null);   // latest rawSt waiting to be saved
-  const lastSavedRef = useRef(null);   // JSON string of last successfully written snapshot
+  // ── Save queue for appState (same pattern as original) ───────────────────
+  const appSaveStatusRef = useRef("idle");
+  const [saveIndicator, setSaveIndicator] = useState("saved");
+  const appPendingRef = useRef(null);
+  const appLastSavedRef = useRef(null);
 
-  // Recursively drains the pending queue after each completed write.
-  const pushToDb = useRef(null);
-  pushToDb.current = async (snapshot) => {
-    saveStatusRef.current = "saving";
+  const pushAppToDb = useRef(null);
+  pushAppToDb.current = async (snapshot) => {
+    appSaveStatusRef.current = "saving";
     setSaveIndicator("saving");
     try {
       const { error } = await supabase
-        .from('app_state')
+        .from("app_state")
         .update({ data: snapshot })
-        .eq('id', 1);
-      if (!error) lastSavedRef.current = JSON.stringify(snapshot);
+        .eq("id", 1);
+      if (!error) appLastSavedRef.current = JSON.stringify(snapshot);
     } catch (e) {
-      console.error("Save error", e);
+      console.error("app_state save error", e);
     }
-    if (pendingRef.current !== null) {
-      const next = pendingRef.current;
-      pendingRef.current = null;
-      pushToDb.current(next);          // push the freshest snapshot immediately
+    if (appPendingRef.current !== null) {
+      const next = appPendingRef.current;
+      appPendingRef.current = null;
+      pushAppToDb.current(next);
     } else {
-      saveStatusRef.current = "idle";
+      appSaveStatusRef.current = "idle";
       setSaveIndicator("saved");
     }
   };
 
-  // Called by every state mutation. Either starts a save or queues the snapshot.
-  const scheduleSave = useRef(null);
-  scheduleSave.current = (snapshot) => {
+  const scheduleAppSave = useRef(null);
+  scheduleAppSave.current = (snapshot) => {
     setSaveIndicator("unsaved");
-    if (saveStatusRef.current === "idle") {
-      // Short debounce so rapid clicks (e.g. checking several boxes quickly)
-      // are still batched into a single request.
-      saveStatusRef.current = "saving";
-      setTimeout(() => pushToDb.current(snapshot), 400);
+    if (appSaveStatusRef.current === "idle") {
+      appSaveStatusRef.current = "saving";
+      setTimeout(() => pushAppToDb.current(snapshot), 400);
     } else {
-      // A save is in-flight — store the latest snapshot; it will be flushed
-      // the moment the current save resolves.
-      pendingRef.current = snapshot;
+      appPendingRef.current = snapshot;
     }
   };
 
-  // Warn before closing the tab while changes are still in-flight.
+  // ── Per-todo upsert queue ─────────────────────────────────────────────────
+  //
+  // Instead of batch-saving the whole blob, we upsert individual rows into
+  // the `todo_items` table. We still debounce to avoid hammering the DB on
+  // rapid successive updates to the same todo.
+  //
+  // pendingTodoUpserts: Map<todoId, rowData>
+  //   Accumulates all dirty todos; flushed every 400ms.
+  const pendingTodoUpserts = useRef(new Map());
+  const todoFlushTimer = useRef(null);
+
+  const flushTodoUpserts = useCallback(async () => {
+    if (pendingTodoUpserts.current.size === 0) return;
+    const rows = Array.from(pendingTodoUpserts.current.entries()).map(([id, data]) => ({
+      id,
+      ...data,
+    }));
+    pendingTodoUpserts.current.clear();
+    try {
+      const { error } = await supabase.from("todo_items").upsert(rows, { onConflict: "id" });
+      if (error) console.error("todo_items upsert error", error);
+    } catch (e) {
+      console.error("todo_items upsert exception", e);
+    }
+  }, [supabase]);
+
+  // Schedule a todo row to be upserted. Called any time a todo's state changes.
+  const scheduleTodoSave = useCallback(
+    (todoId, rowData) => {
+      setSaveIndicator("unsaved");
+      pendingTodoUpserts.current.set(todoId, rowData);
+      if (todoFlushTimer.current) clearTimeout(todoFlushTimer.current);
+      todoFlushTimer.current = setTimeout(async () => {
+        await flushTodoUpserts();
+        setSaveIndicator("saved");
+      }, 400);
+    },
+    [flushTodoUpserts]
+  );
+
+  // Warn before closing tab when saves are pending
   useEffect(() => {
     const guard = (e) => {
-      if (saveStatusRef.current !== "idle" || pendingRef.current !== null) {
+      if (
+        appSaveStatusRef.current !== "idle" ||
+        appPendingRef.current !== null ||
+        pendingTodoUpserts.current.size > 0 ||
+        todoFlushTimer.current !== null
+      ) {
         e.preventDefault();
         e.returnValue = "";
       }
@@ -335,62 +477,95 @@ function SSQTracker({ supabase, session }) {
     return () => window.removeEventListener("beforeunload", guard);
   }, []);
 
-  // ── Initial load + realtime subscription ───────────────────────────────
+  // ── Initial load + realtime subscriptions ────────────────────────────────
   useEffect(() => {
-    let subscription;
+    let appSub, todoSub;
 
     async function loadData() {
-      const { data, error } = await supabase
-        .from('app_state')
-        .select('data')
-        .eq('id', 1)
+      // 1. Load non-todo app state
+      const { data: appRow, error: appErr } = await supabase
+        .from("app_state")
+        .select("data")
+        .eq("id", 1)
         .single();
-      if (!error && data?.data) {
-        lastSavedRef.current = JSON.stringify(data.data);
-        setSt(prev => ({ ...prev, ...data.data }));
+      if (!appErr && appRow?.data) {
+        appLastSavedRef.current = JSON.stringify(appRow.data);
+        setAppState((prev) => ({ ...prev, ...appRow.data }));
       }
+
+      // 2. Load all todo rows
+      const { data: todoRows, error: todoErr } = await supabase
+        .from("todo_items")
+        .select("*");
+      if (!todoErr && todoRows) {
+        const map = {};
+        for (const row of todoRows) {
+          const { id, ...rest } = row;
+          map[id] = rest;
+        }
+        setTodoItems(map);
+      }
+
       setLoadingInitial(false);
     }
 
     loadData();
 
-    subscription = supabase
-      .channel('public:app_state')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'app_state', filter: 'id=eq.1' }, (payload) => {
-        if (!payload.new?.data) return;
-        const remoteStr = JSON.stringify(payload.new.data);
-
-        // Suppress our own echo.
-        if (remoteStr === lastSavedRef.current) return;
-
-        // Ignore remote updates while we have unsaved local changes — our
-        // pending write will land after this one and become the DB truth.
-        if (saveStatusRef.current !== "idle" || pendingRef.current !== null) return;
-
-        // Safe to adopt: no local changes in-flight.
-        setSt(prev => {
-          if (JSON.stringify(prev) === remoteStr) return prev;
-          lastSavedRef.current = remoteStr;
-          return payload.new.data;
-        });
-      })
+    // Realtime: app_state changes from other clients
+    appSub = supabase
+      .channel("public:app_state")
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "app_state", filter: "id=eq.1" },
+        (payload) => {
+          if (!payload.new?.data) return;
+          const remoteStr = JSON.stringify(payload.new.data);
+          if (remoteStr === appLastSavedRef.current) return; // suppress own echo
+          if (appSaveStatusRef.current !== "idle" || appPendingRef.current !== null) return;
+          setAppState((prev) => {
+            if (JSON.stringify(prev) === remoteStr) return prev;
+            appLastSavedRef.current = remoteStr;
+            return payload.new.data;
+          });
+        }
+      )
       .subscribe();
 
-    return () => { if (subscription) supabase.removeChannel(subscription); };
-  }, []);
+    // Realtime: todo_items changes from other clients
+    todoSub = supabase
+      .channel("public:todo_items")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "todo_items" },
+        (payload) => {
+          const row = payload.new || payload.old;
+          if (!row?.id) return;
+          // Skip if we have a pending upsert for this id (our change wins)
+          if (pendingTodoUpserts.current.has(row.id)) return;
+          const { id, ...rest } = row;
+          setTodoItems((prev) => ({ ...prev, [id]: rest }));
+        }
+      )
+      .subscribe();
 
+    return () => {
+      if (appSub) supabase.removeChannel(appSub);
+      if (todoSub) supabase.removeChannel(todoSub);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-
-
-  // — helpers
+  // ── Derived day ──────────────────────────────────────────────────────────
   const todayAtMidnight = new Date();
   todayAtMidnight.setHours(0, 0, 0, 0);
-  const startAtMidnight = new Date(rawSt.startDate);
+  const startAtMidnight = new Date(appState.startDate);
   startAtMidnight.setHours(0, 0, 0, 0);
-  const currentDay = Math.max(1, Math.min(7, Math.floor((todayAtMidnight.getTime() - startAtMidnight.getTime()) / (1000 * 60 * 60 * 24)) + 1));
-  const st = { ...rawSt, day: currentDay };
+  const currentDay = Math.max(
+    1,
+    Math.min(7, Math.floor((todayAtMidnight - startAtMidnight) / (1000 * 60 * 60 * 24)) + 1)
+  );
+  const st = { ...appState, day: currentDay };
 
-  // ── task helpers
+  // ── Task helpers ──────────────────────────────────────────────────────────
   const flatTaskGroups = [];
   TASK_STAGES.forEach((stage, sIdx) => {
     stage.taskGroups.forEach((g, gIdx) => {
@@ -398,37 +573,25 @@ function SSQTracker({ supabase, session }) {
     });
   });
 
-  const activeIdx = Math.min(
-    flatTaskGroups.length - 1,
-    rawSt?.activeTaskIndex ?? 0
-  );
+  const activeIdx = Math.min(flatTaskGroups.length - 1, appState?.activeTaskIndex ?? 0);
   const activeEntry = flatTaskGroups[activeIdx] || flatTaskGroups[0];
   const activeStage = activeEntry.stage;
   const activeGroup = activeEntry.group;
 
-  const countTodos = (todos) => {
-    return todos.reduce((acc, t) => {
-      if (t.isGroup && t.children) {
-        return acc + countTodos(t.children);
-      }
-      return acc + 1;
-    }, 0);
-  };
+  // ── Todo accessors (read from todoItems map) ──────────────────────────────
+  const getTodoRow = (todoId) => todoItems[todoId] || {};
 
-  const isTodoDone = (todo) => {
-    const key = `${todo.id}`;
-    return !!st.checkedTodos?.[key];
-  };
+  const isTodoDone = (todo) => !!getTodoRow(todo.id).checked;
+
+  const countTodos = (todos) =>
+    todos.reduce((acc, t) => (t.isGroup && t.children ? acc + countTodos(t.children) : acc + 1), 0);
 
   const groupDoneCount = (group) => {
     let done = 0;
     const walk = (todos) => {
-      todos.forEach(t => {
-        if (t.isGroup && t.children) {
-          walk(t.children);
-        } else if (isTodoDone(t)) {
-          done += 1;
-        }
+      todos.forEach((t) => {
+        if (t.isGroup && t.children) walk(t.children);
+        else if (isTodoDone(t)) done++;
       });
     };
     walk(group.todos || []);
@@ -439,26 +602,16 @@ function SSQTracker({ supabase, session }) {
   const groupPct = (group) => {
     const total = groupTotalCount(group);
     if (!total) return 0;
-    return Math.round(groupDoneCount(group) / total * 100);
+    return Math.round((groupDoneCount(group) / total) * 100);
   };
 
   const groupHasDelay = (group) => {
-    const meta = st.todoMeta || {};
-    // If we're past this group's deadline and it's not fully complete, treat it as delayed.
-    if (st.day > group.endDay && groupPct(group) < 100) {
-      return true;
-    }
+    if (st.day > group.endDay && groupPct(group) < 100) return true;
     let delayed = false;
     const walk = (todos) => {
-      todos.forEach(t => {
-        if (t.isGroup && t.children) {
-          walk(t.children);
-        } else {
-          const key = `${t.id}`;
-          if (meta[key]?.isDelayed) {
-            delayed = true;
-          }
-        }
+      todos.forEach((t) => {
+        if (t.isGroup && t.children) walk(t.children);
+        else if (getTodoRow(t.id).is_delayed) delayed = true;
       });
     };
     walk(group.todos || []);
@@ -466,123 +619,171 @@ function SSQTracker({ supabase, session }) {
   };
 
   const activeGroupDelayed = groupHasDelay(activeGroup);
+  const allDone = flatTaskGroups.reduce((s, e) => s + groupDoneCount(e.group), 0);
+  const allTotal = flatTaskGroups.reduce((s, e) => s + groupTotalCount(e.group), 0);
+  const weekPct = allTotal ? Math.round((allDone / allTotal) * 100) : 0;
+  const stageForDay = (day) => TASK_STAGES.find((s) => day >= s.startDay && day <= s.endDay) || TASK_STAGES[0];
 
-  const allDone = flatTaskGroups.reduce((sum, e) => sum + groupDoneCount(e.group), 0);
-  const allTotal = flatTaskGroups.reduce((sum, e) => sum + groupTotalCount(e.group), 0);
-  const weekPct = allTotal ? Math.round(allDone / allTotal * 100) : 0;
+  // ── State mutation helpers ────────────────────────────────────────────────
 
-  const stageForDay = (day) =>
-    TASK_STAGES.find(s => day >= s.startDay && day <= s.endDay) || TASK_STAGES[0];
-
-  // ── State mutation helpers ─────────────────────────────────────────────
-  // Every helper that changes rawSt calls scheduleSave(nextState) so the
-  // queue-based sync picks it up. We compute the next state explicitly
-  // (instead of relying on React's async setState batching) so we can pass
-  // the exact snapshot to the save queue synchronously.
-
+  // Update non-todo appState + schedule DB save
   const upd = (patch) => {
-    setSt(p => {
+    setAppState((p) => {
       const next = { ...p, ...patch };
-      if (!loadingInitial) scheduleSave.current(next);
-      return next;
-    });
-  };
-
-  const togTodo = (todo, context = {}) => {
-    const key = `${todo.id}`;
-    const myEmail = session?.user?.email || null;
-
-    setSt(p => {
-      const prevChecked = !!p.checkedTodos?.[key];
-      const nextChecked = !prevChecked;
-      const nextCheckedTodos = { ...(p.checkedTodos || {}), [key]: nextChecked };
-
-      let next;
-      if (!nextChecked) {
-        next = { ...p, checkedTodos: nextCheckedTodos };
-      } else {
-        const lockedInfo = p.lockedTodos?.[key] || {};
-        const startedAt = lockedInfo.lockedAt || context.lockedAt || Date.now();
-        const completedAt = Date.now();
-        const completedBy =
-          myEmail || context.lockedByEmail || lockedInfo.lockedBy ||
-          p.todoMeta?.[key]?.completedBy || null;
-        const durationMs = completedAt - startedAt;
-        const prevMeta = p.todoMeta || {};
-        const existingMeta = prevMeta[key] || {};
-        const isDelayed = context.isDelayed ?? existingMeta.isDelayed ?? false;
-        next = {
-          ...p,
-          checkedTodos: nextCheckedTodos,
-          todoMeta: {
-            ...prevMeta,
-            [key]: { ...existingMeta, startedAt, completedAt, completedBy, durationMs, isDelayed },
-          },
-        };
-      }
-      if (!loadingInitial) scheduleSave.current(next);
+      if (!loadingInitial) scheduleAppSave.current(next);
       return next;
     });
   };
 
   const setM = (day, key, val) => {
-    setSt(p => {
+    setAppState((p) => {
       const next = { ...p, metrics: { ...p.metrics, [day]: { ...p.metrics[day], [key]: val } } };
-      if (!loadingInitial) scheduleSave.current(next);
+      if (!loadingInitial) scheduleAppSave.current(next);
       return next;
     });
   };
 
+  // Toggle a leaf todo: updates todoItems state and upserts the row to DB
+  const togTodo = (todo, context = {}) => {
+    const todoId = todo.id;
+    const myEmail = session?.user?.email || null;
+
+    setTodoItems((prev) => {
+      const existing = prev[todoId] || {};
+      const prevChecked = !!existing.checked;
+      const nextChecked = !prevChecked;
+
+      let nextRow;
+      if (!nextChecked) {
+        // Un-check: clear completion data, keep lock info as-is
+        nextRow = { ...existing, checked: false, completed_at: null, completed_by: null, duration_ms: null };
+      } else {
+        const startedAt = existing.locked_at || context.lockedAt || Date.now();
+        const completedAt = Date.now();
+        const completedBy = myEmail || context.lockedByEmail || existing.locked_by || existing.completed_by || null;
+        const durationMs = completedAt - startedAt;
+        let isDelayed = !!existing.is_delayed;
+        if (!isDelayed && todo.minutes > 0 && existing.locked_at) {
+          if (completedAt > existing.locked_at + todo.minutes * 60 * 1000) isDelayed = true;
+        }
+        nextRow = {
+          ...existing,
+          checked: true,
+          started_at: startedAt,
+          completed_at: completedAt,
+          completed_by: completedBy,
+          duration_ms: durationMs,
+          is_delayed: isDelayed,
+          locked_by: null,
+          locked_at: null,
+        };
+      }
+
+      // Schedule individual row upsert
+      if (!loadingInitial) scheduleTodoSave(todoId, nextRow);
+      return { ...prev, [todoId]: nextRow };
+    });
+  };
+
+  // Toggle the lock on a leaf todo (start/stop working)
+  const togLock = (todoId, myEmail) => {
+    setTodoItems((prev) => {
+      const existing = prev[todoId] || {};
+      let nextRow;
+
+      if (existing.locked_by === myEmail) {
+        // Release own lock
+        nextRow = { ...existing, locked_by: null, locked_at: null };
+        if (!loadingInitial) scheduleTodoSave(todoId, nextRow);
+        return { ...prev, [todoId]: nextRow };
+      }
+
+      // Acquire lock — first release any other lock held by this user
+      const updated = { ...prev };
+      for (const [id, row] of Object.entries(updated)) {
+        if (row.locked_by === myEmail) {
+          const released = { ...row, locked_by: null, locked_at: null };
+          updated[id] = released;
+          if (!loadingInitial) scheduleTodoSave(id, released);
+        }
+      }
+      nextRow = { ...(updated[todoId] || {}), locked_by: myEmail, locked_at: Date.now() };
+      if (!loadingInitial) scheduleTodoSave(todoId, nextRow);
+      return { ...updated, [todoId]: nextRow };
+    });
+  };
+
+  // ── Reset to Day 1 ───────────────────────────────────────────────────────
+  // Resets startDate to today (forcing currentDay back to 1), clears activeTaskIndex,
+  // wipes all metrics / hypothesis / verdict fields, and deletes every todo row in DB.
+  const resetToDay1 = async () => {
+    const fresh = getEmptyAppState();
+    // 1. Reset app_state in DB
+    setAppState(fresh);
+    try {
+      await supabase.from("app_state").update({ data: fresh }).eq("id", 1);
+      appLastSavedRef.current = JSON.stringify(fresh);
+    } catch (e) {
+      console.error("reset app_state error", e);
+    }
+    // 2. Delete all todo_items rows so the DB reflects a clean slate
+    setTodoItems({});
+    try {
+      // Delete all rows — no filter needed since we want all gone
+      await supabase.from("todo_items").delete().neq("id", "");
+    } catch (e) {
+      console.error("reset todo_items error", e);
+    }
+    setSaveIndicator("saved");
+  };
+
+  // ── Derived metrics ───────────────────────────────────────────────────────
   const totAtt = sumField(st.metrics, "attempts");
   const totRep = sumField(st.metrics, "replies");
   const totShow = sumField(st.metrics, "shows");
   const totClose = sumField(st.metrics, "closes");
   const totRev = sumField(st.metrics, "revenue");
-  const repRate = totAtt ? (totRep / totAtt * 100).toFixed(1) : null;
-  const showRate = totRep ? (totShow / totRep * 100).toFixed(1) : null;
-
+  const repRate = totAtt ? ((totRep / totAtt) * 100).toFixed(1) : null;
+  const showRate = totRep ? ((totShow / totRep) * 100).toFixed(1) : null;
   const hypLocked = st.hyp.who && st.hyp.pain && st.hyp.outcome && st.hyp.price;
 
   const leaks = [
-    { id: "vol", label: "VOLUME", color: "#F06449", active: totAtt < 30 && st.day >= 4, msg: "Sending < 10/day. Protect your outreach block." },
-    { id: "msg", label: "MESSAGE", color: "#E8C547", active: totAtt >= 30 && parseFloat(repRate) < 1, msg: "Reply rate < 1%. Rewrite first 2 lines of your message." },
-    { id: "fup", label: "FOLLOWUP", color: "#5B9CF6", active: totRep > 0 && totShow === 0, msg: "Replies exist but no calls booked. Send calendar link on first signal." },
-    { id: "call", label: "CALL", color: "#52D68A", active: totShow > 0 && totClose === 0, msg: "Calls happening but no close. Tighten your call structure." },
+    { id: "vol",  label: "VOLUME",   color: "#F06449", active: totAtt < 30 && st.day >= 4, msg: "Sending < 10/day. Protect your outreach block." },
+    { id: "msg",  label: "MESSAGE",  color: "#E8C547", active: totAtt >= 30 && parseFloat(repRate) < 1, msg: "Reply rate < 1%. Rewrite first 2 lines of your message." },
+    { id: "fup",  label: "FOLLOWUP", color: "#5B9CF6", active: totRep > 0 && totShow === 0, msg: "Replies exist but no calls booked. Send calendar link on first signal." },
+    { id: "call", label: "CALL",     color: "#52D68A", active: totShow > 0 && totClose === 0, msg: "Calls happening but no close. Tighten your call structure." },
   ];
-  const hotLeaks = leaks.filter(l => l.active);
+  const hotLeaks = leaks.filter((l) => l.active);
 
-  // — shared style tokens
+  // ── Style tokens ──────────────────────────────────────────────────────────
   const C = {
     bg: "#080808", bg2: "#0d0d0d", bg3: "#121212",
     border: "#1a1a1a", border2: "#222",
     text: "#C8C5BE", textHi: "#E8E4DC", textDim: "#555",
   };
-
   const card = (borderCol) => ({
-    background: C.bg2, border: `1px solid ${borderCol || C.border}`,
-    borderRadius: 6, padding: "18px 20px", marginBottom: 16,
+    background: C.bg2,
+    border: `1px solid ${borderCol || C.border}`,
+    borderRadius: 6,
+    padding: "18px 20px",
+    marginBottom: 16,
   });
-
   const lbl = { fontSize: 9, letterSpacing: 3, color: C.textDim, textTransform: "uppercase", display: "block", marginBottom: 8 };
-
   const input = {
     width: "100%", background: "#0a0a0a", border: `1px solid ${C.border2}`,
     borderRadius: 4, color: C.textHi, padding: "8px 11px",
     fontSize: 12, fontFamily: "inherit", outline: "none", lineHeight: 1.6,
   };
-
   const tarea = { ...input, resize: "vertical", minHeight: 68 };
 
-  // timer bookkeeping for locked todos (minutes countdown)
+  // ── Timer ─────────────────────────────────────────────────────────────────
   const [now, setNow] = useState(Date.now());
-
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
-
-
+  // ── Loading screen ────────────────────────────────────────────────────────
   if (loadingInitial) {
     return (
       <div style={{ background: "#080808", color: "#C8C5BE", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "monospace" }}>
@@ -590,18 +791,24 @@ function SSQTracker({ supabase, session }) {
       </div>
     );
   }
-  // Helper component rendered inline for task trees with locking + timers
-  //
-  // `enforceSequential` — when true, each sibling must be fully done before the next
-  //   can be started. This is only enabled for children INSIDE an isGroup node, NOT
-  //   at the top level of a task-group (where all top-level todos are freely accessible).
-  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0, onInteractionError, inheritedLockEmail, enforceSequential = false }) {
 
-    // Find the email of whoever has an active lock anywhere inside a list of children.
-    // Used to surface a group-level "who is working on this" attribution.
+  // ══════════════════════════════════════════════════════════════════════════
+  //  INNER COMPONENTS
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * TaskList
+   * Renders a list of todos with checkboxes, lock buttons, and timers.
+   * Reads lock/check state from the `todoItems` map (DB-backed).
+   * Calls togTodo / togLock for mutations.
+   */
+  function TaskList({ todos, onToggle, isDone, accentColor, C, depth = 0, onInteractionError, inheritedLockEmail, enforceSequential = false }) {
+    const myEmail = session?.user?.email;
+
     const findGroupLock = (list) => {
       for (const t of list) {
-        if (st.lockedTodos?.[t.id]?.lockedBy) return st.lockedTodos[t.id].lockedBy;
+        const row = getTodoRow(t.id);
+        if (row.locked_by) return row.locked_by;
         if (t.isGroup && t.children) {
           const childLock = findGroupLock(t.children);
           if (childLock) return childLock;
@@ -610,135 +817,72 @@ function SSQTracker({ supabase, session }) {
       return null;
     };
 
-    // Running tally for sequential blocking — only meaningful when enforceSequential=true.
     let allPreviousSiblingsDone = true;
 
     return (
       <div>
         {todos.map((todo) => {
           const done = !todo.isGroup && isDone(todo);
-          // A group row is "fully done" only when all its leaf descendants are checked.
           const isGroupFullyDone = todo.isGroup ? groupPct(todo) === 100 : done;
-
           const isGroup = todo.isGroup;
-          const key = todo.id;
-          const meta = st.todoMeta?.[key];
-          const isDelayed = !!meta?.isDelayed;
-          const myEmail = session?.user?.email;
+          const todoId = todo.id;
+          const row = getTodoRow(todoId);
 
-          // ── Locking for leaf todos ──────────────────────────────────────────
-          // A leaf is locked either explicitly (it holds its own lock entry) or
-          // implicitly because an ancestor group passed down inheritedLockEmail.
-          const explicitLock = !isGroup ? st.lockedTodos?.[key] : null;
-          const leafLockedByEmail = !isGroup ? (explicitLock?.lockedBy || inheritedLockEmail) : null;
+          const isDelayed = !!row.is_delayed;
+          const explicitLock = !isGroup ? row : null;
+          const leafLockedByEmail = !isGroup ? (explicitLock?.locked_by || inheritedLockEmail) : null;
           const leafLocked = !!leafLockedByEmail;
-          const leafLockedAt = explicitLock?.lockedAt || null;
+          const leafLockedAt = explicitLock?.locked_at || null;
           const isLeafLockedByMe = leafLocked && leafLockedByEmail === myEmail;
           const isLeafLockedByOther = leafLocked && leafLockedByEmail !== myEmail;
 
-          // ── Attribution for group rows ───────────────────────────────────────
-          // When any child of this group is locked, show the locker's name on
-          // the GROUP header row — not on every individual child inside it.
           const groupActiveLockEmail = isGroup ? (findGroupLock(todo.children || []) || inheritedLockEmail) : null;
           const groupIsLockedByOther = !!groupActiveLockEmail && groupActiveLockEmail !== myEmail;
 
-          // ── Timer (only for explicit leaf locks with a known lockedAt) ──────
           const minutes = todo.minutes || 0;
           const deadlineMs = minutes * 60 * 1000;
           const remainingMs = leafLocked && leafLockedAt ? Math.max(0, leafLockedAt + deadlineMs - now) : null;
           const remainingMin = remainingMs != null ? Math.floor(remainingMs / 60000) : null;
           const remainingSec = remainingMs != null ? Math.floor((remainingMs % 60000) / 1000) : null;
 
-          // ── Sequential blocking — only inside todo groups ───────────────────
-          // Bug 2 fix: top-level task-group todos are never sequentially blocked
-          // (enforceSequential=false at the root). Only children of an isGroup node
-          // are sequential (enforceSequential=true passed when rendering children).
           const sequentialBlocked = enforceSequential && !allPreviousSiblingsDone;
           allPreviousSiblingsDone = allPreviousSiblingsDone && isGroupFullyDone;
 
-          // ── Lock toggle handler (leaves only) ──────────────────────────────
-          const toggleLock = () => {
-            if (sequentialBlocked) {
-              onInteractionError && onInteractionError("Complete the previous task first.");
-              return;
-            }
-            if (isLeafLockedByOther) {
-              onInteractionError && onInteractionError(`${leafLockedByEmail.split('@')[0]} is working on this task.`);
-              return;
-            }
-            onInteractionError && onInteractionError("");
-
-            setSt(p => {
-              const existing = p.lockedTodos || {};
-              let nextState;
-              // Toggle off — user is releasing their own lock
-              if (existing[key]?.lockedBy === myEmail) {
-                const copy = { ...existing };
-                delete copy[key];
-                nextState = { ...p, lockedTodos: copy };
-              } else {
-                // Switch to this task — release any other lock held by this user
-                // (one active task per person, but teammates can lock different tasks simultaneously)
-                const next = { ...existing };
-                for (const k in next) {
-                  if (next[k]?.lockedBy === myEmail) delete next[k];
-                }
-                next[key] = { lockedAt: Date.now(), lockedBy: myEmail };
-                nextState = { ...p, lockedTodos: next };
-              }
-              scheduleSave.current(nextState);
-              return nextState;
-            });
+          // Lock toggle
+          const handleLockToggle = () => {
+            if (sequentialBlocked) { onInteractionError?.("Complete the previous task first."); return; }
+            if (isLeafLockedByOther) { onInteractionError?.(`${leafLockedByEmail.split("@")[0]} is working on this task.`); return; }
+            onInteractionError?.("");
+            togLock(todoId, myEmail);
           };
 
-          // ── Checkbox click handler (leaves only) ────────────────────────────
+          // Check toggle
           const handleCheck = () => {
-            // Bug 1 fix: if the task is already done, always allow unchecking — no lock needed.
-            if (done) {
-              onInteractionError && onInteractionError("");
-              onToggle(todo, { lockedAt: leafLockedAt, lockedByEmail: leafLockedByEmail, isDelayed });
-              return;
-            }
-
-            if (sequentialBlocked) {
-              onInteractionError && onInteractionError("Complete the previous task first.");
-              return;
-            }
+            if (done) { onInteractionError?.(""); onToggle(todo, { lockedAt: leafLockedAt, lockedByEmail: leafLockedByEmail, isDelayed }); return; }
+            if (sequentialBlocked) { onInteractionError?.("Complete the previous task first."); return; }
             if (!isLeafLockedByMe) {
-              if (!leafLocked) {
-                onInteractionError && onInteractionError("Start this task before marking it done.");
-              } else if (isLeafLockedByOther) {
-                const who = leafLockedByEmail ? leafLockedByEmail.split("@")[0] : "someone else";
-                onInteractionError && onInteractionError(`Only ${who} can complete this task.`);
-              }
+              if (!leafLocked) { onInteractionError?.("Start this task before marking it done."); }
+              else if (isLeafLockedByOther) { onInteractionError?.(`Only ${leafLockedByEmail.split("@")[0]} can complete this task.`); }
               return;
             }
-
-            onInteractionError && onInteractionError("");
-            const nowTs = Date.now();
-            let isTodoDelayed = !!isDelayed;
-            if (!isTodoDelayed && minutes > 0 && leafLockedAt) {
-              if (nowTs > leafLockedAt + minutes * 60 * 1000) isTodoDelayed = true;
-            }
-            onToggle(todo, { lockedAt: leafLockedAt, lockedByEmail: leafLockedByEmail, isDelayed: isTodoDelayed });
+            onInteractionError?.("");
+            onToggle(todo, { lockedAt: leafLockedAt, lockedByEmail: leafLockedByEmail, isDelayed });
           };
 
           return (
-            <div key={todo.id} style={{ marginLeft: depth * 14, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+            <div key={todoId} style={{ marginLeft: depth * 14, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
               <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
 
-                {/* ── Checkbox (leaves) or Group marker ── */}
+                {/* Checkbox / Group marker */}
                 {!isGroup ? (
-                  <button
-                    onClick={handleCheck}
-                    style={{
-                      width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1,
-                      border: `1.5px solid ${done ? accentColor : "#2a2a2a"}`,
-                      background: done ? accentColor : "transparent",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      transition: "all .15s", cursor: "pointer",
-                    }}
-                  >
+                  <button onClick={handleCheck} style={{
+                    width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1,
+                    border: `1.5px solid ${done ? accentColor : "#2a2a2a"}`,
+                    background: done ? accentColor : "transparent",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    transition: "all .15s", cursor: "pointer",
+                  }}>
+                    {/* CONDITION 20: done → SVG checkmark */}
                     {done && (
                       <svg width="9" height="7" viewBox="0 0 9 7" fill="none">
                         <path d="M1 3.5L3.5 6 8 1" stroke="#080808" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -748,7 +892,7 @@ function SSQTracker({ supabase, session }) {
                 ) : (
                   <div style={{
                     width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1,
-                    border: `1.5px solid #2a2a2a`, background: "#050505",
+                    border: "1.5px solid #2a2a2a", background: "#050505",
                     display: "flex", alignItems: "center", justifyContent: "center",
                     fontSize: 10, color: "#444",
                   }}>G</div>
@@ -756,45 +900,31 @@ function SSQTracker({ supabase, session }) {
 
                 <div style={{ flex: 1 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                    <span style={{
-                      fontSize: 12, lineHeight: 1.55,
-                      color: done ? "#3a3a3a" : C.text,
-                      textDecoration: done ? "line-through" : "none",
-                      transition: "color .15s",
-                    }}>
-                      {todo.label}
-                      {isDelayed && " (Time Limit Exceeded)"}
+                    <span style={{ fontSize: 12, lineHeight: 1.55, color: done ? "#3a3a3a" : C.text, textDecoration: done ? "line-through" : "none", transition: "color .15s" }}>
+                      {todo.label}{isDelayed && " (Time Limit Exceeded)"}
                     </span>
 
                     <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                      {/* Bug 4 fix: minutes badge only on leaf todos */}
                       {minutes > 0 && !isGroup && (
                         <span style={{ fontSize: 9, color: "#444" }}>{minutes}m</span>
                       )}
 
-                      {/* Bug 4 fix: "Start / Working / By X" button on leaf todos only,
-                          and only while the task is not yet done */}
+                      {/* CONDITION 19: leaf, not done → Start/Working/By button */}
                       {!isGroup && !done && (
-                        <button
-                          onClick={toggleLock}
-                          disabled={isLeafLockedByOther}
-                          style={{
-                            fontSize: 9, letterSpacing: 1, padding: "3px 7px", borderRadius: 3,
-                            border: `1px solid ${isLeafLockedByOther ? "#444" : isLeafLockedByMe ? accentColor : "#222"}`,
-                            background: isLeafLockedByOther ? "#111" : isLeafLockedByMe ? accentColor : "transparent",
-                            color: isLeafLockedByOther ? "#555" : isLeafLockedByMe ? "#080808" : "#555",
-                            textTransform: "uppercase",
-                            cursor: isLeafLockedByOther ? "not-allowed" : "pointer",
-                            opacity: isLeafLockedByOther ? 0.7 : 1,
-                          }}
-                        >
-                          {isLeafLockedByOther
-                            ? `By ${leafLockedByEmail.split('@')[0]}`
-                            : isLeafLockedByMe ? "Working" : "Start"}
+                        <button onClick={handleLockToggle} disabled={isLeafLockedByOther} style={{
+                          fontSize: 9, letterSpacing: 1, padding: "3px 7px", borderRadius: 3,
+                          border: `1px solid ${isLeafLockedByOther ? "#444" : isLeafLockedByMe ? accentColor : "#222"}`,
+                          background: isLeafLockedByOther ? "#111" : isLeafLockedByMe ? accentColor : "transparent",
+                          color: isLeafLockedByOther ? "#555" : isLeafLockedByMe ? "#080808" : "#555",
+                          textTransform: "uppercase",
+                          cursor: isLeafLockedByOther ? "not-allowed" : "pointer",
+                          opacity: isLeafLockedByOther ? 0.7 : 1,
+                        }}>
+                          {isLeafLockedByOther ? `By ${leafLockedByEmail.split("@")[0]}` : isLeafLockedByMe ? "Working" : "Start"}
                         </button>
                       )}
 
-                      {/* Bug 4 fix: group attribution shown on the GROUP row header only */}
+                      {/* CONDITION 23: group with an active lock, not fully done → Working/By badge */}
                       {isGroup && groupActiveLockEmail && !isGroupFullyDone && (
                         <span style={{
                           fontSize: 9, letterSpacing: 1, padding: "3px 7px", borderRadius: 3,
@@ -803,35 +933,25 @@ function SSQTracker({ supabase, session }) {
                           color: groupIsLockedByOther ? "#555" : "#080808",
                           textTransform: "uppercase",
                         }}>
-                          {groupIsLockedByOther
-                            ? `By ${groupActiveLockEmail.split('@')[0]}`
-                            : "Working"}
+                          {groupIsLockedByOther ? `By ${groupActiveLockEmail.split("@")[0]}` : "Working"}
                         </span>
                       )}
                     </div>
                   </div>
 
-                  {/* Bug 4 fix: timer only shown on the leaf that holds the explicit lock,
-                      not propagated to siblings via inheritedLockEmail */}
+                  {/* CONDITION 21: leaf locked with lockedAt → countdown timer */}
                   {!isGroup && leafLockedAt && remainingMs != null && (
                     <div style={{ marginTop: 4, fontSize: 10, color: remainingMs === 0 ? "#F06449" : accentColor }}>
-                      {remainingMs === 0
-                        ? "Deadline passed"
-                        : `Time left: ${remainingMin}m ${remainingSec.toString().padStart(2, "0")}s`}
+                      {remainingMs === 0 ? "Deadline passed" : `Time left: ${remainingMin}m ${String(remainingSec).padStart(2, "0")}s`}
                     </div>
-
                   )}
+
+                  {/* CONDITION 22: leaf with detail, locked by me, not done → hint block */}
                   {!isGroup && todo.detail && isLeafLockedByMe && !done && (
                     <div style={{
-                      marginTop: 8,
-                      padding: "8px 12px",
-                      background: "#0f0f0f",
-                      border: `1px solid ${accentColor}22`,
-                      borderLeft: `2px solid ${accentColor}`,
-                      borderRadius: 4,
-                      fontSize: 11,
-                      color: "#666",
-                      lineHeight: 1.7,
+                      marginTop: 8, padding: "8px 12px", background: "#0f0f0f",
+                      border: `1px solid ${accentColor}22`, borderLeft: `2px solid ${accentColor}`,
+                      borderRadius: 4, fontSize: 11, color: "#666", lineHeight: 1.7,
                     }}>
                       {todo.detail}
                     </div>
@@ -839,7 +959,7 @@ function SSQTracker({ supabase, session }) {
                 </div>
               </div>
 
-              {/* Recurse into group children — sequential ordering ON inside groups */}
+              {/* CONDITION 24: group with children → recursive TaskList */}
               {isGroup && todo.children && todo.children.length > 0 && (
                 <div style={{ marginTop: 4 }}>
                   <TaskList
@@ -862,53 +982,53 @@ function SSQTracker({ supabase, session }) {
     );
   }
 
+  /**
+   * HistoryList
+   * Read-only view of todos with completion metadata (read from todoItems).
+   */
   function HistoryList({ todos, isDone, C, depth = 0 }) {
     return (
       <div>
-        {todos.map(todo => {
+        {todos.map((todo) => {
           const done = !todo.isGroup && isDone(todo);
           const isGroup = todo.isGroup;
-          const key = todo.id;
-          const meta = st.todoMeta?.[key] || {};
-          const isDelayed = !!meta.isDelayed;
-          const completedBy = meta.completedBy || "Unknown";
-          const completedAt = meta.completedAt;
-
+          const row = getTodoRow(todo.id);
+          const isDelayed = !!row.is_delayed;
+          const completedBy = row.completed_by || "Unknown";
+          const completedAt = row.completed_at;
           let dayCompleted = null;
-          if (completedAt) {
-            dayCompleted = Math.floor((completedAt - startAtMidnight.getTime()) / 86400000) + 1;
-          }
-
-          const durMin = meta.durationMs ? Math.floor(meta.durationMs / 60000) : 0;
-          const durSec = meta.durationMs ? Math.floor((meta.durationMs % 60000) / 1000) : 0;
+          if (completedAt) dayCompleted = Math.floor((completedAt - startAtMidnight.getTime()) / 86400000) + 1;
+          const durMin = row.duration_ms ? Math.floor(row.duration_ms / 60000) : 0;
+          const durSec  = row.duration_ms ? Math.floor((row.duration_ms % 60000) / 1000) : 0;
           const formattedDuration = `${durMin}m ${durSec}s`;
 
           return (
             <div key={todo.id} style={{ marginLeft: depth * 14, padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
               <div style={{ display: "flex", flex: 1, alignItems: "flex-start", gap: 10 }}>
                 {isGroup ? (
-                  <div style={{ width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1, border: `1.5px solid #2a2a2a`, background: "#050505", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#444" }}>G</div>
+                  <div style={{ width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1, border: "1.5px solid #2a2a2a", background: "#050505", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#444" }}>G</div>
                 ) : (
                   <div style={{ width: 17, height: 17, borderRadius: 3, flexShrink: 0, marginTop: 1, border: `1.5px solid ${done ? "#52D68A" : "#F06449"}`, background: done ? "#52D68A" : "transparent", display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {done && <svg width="9" height="7" viewBox="0 0 9 7" fill="none"><path d="M1 3.5L3.5 6 8 1" stroke="#080808" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>}
                   </div>
                 )}
-
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12, color: done ? "#C8C5BE" : C.text, textDecoration: done ? "none" : (isGroup ? "none" : "line-through") }}>
+                  <div style={{ fontSize: 12, color: done ? "#C8C5BE" : C.text, textDecoration: done ? "none" : isGroup ? "none" : "line-through" }}>
                     {todo.label}
                   </div>
                   {!isGroup && (
                     <div style={{ fontSize: 10, color: "#888", marginTop: 4, display: "flex", flexWrap: "wrap", gap: "10px" }}>
+                      {/* CONDITION 25: done leaf → completion metadata */}
                       {done ? (
                         <>
                           <span style={{ color: "#52D68A" }}>Completed</span>
-                          <span>By: {completedBy.split('@')[0]}</span>
+                          <span>By: {completedBy.split("@")[0]}</span>
                           <span>Day: {dayCompleted}</span>
                           <span>Time taken: {formattedDuration}</span>
                           {isDelayed ? <span style={{ color: "#F06449" }}>Delayed</span> : <span style={{ color: "#52D68A" }}>Within time limit</span>}
                         </>
                       ) : (
+                        /* CONDITION 26: not-done leaf → missed label */
                         <span style={{ color: "#F06449" }}>Missed / Not Done</span>
                       )}
                     </div>
@@ -927,6 +1047,10 @@ function SSQTracker({ supabase, session }) {
     );
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  //  RENDER
+  // ══════════════════════════════════════════════════════════════════════════
+
   return (
     <div style={{ fontFamily: "'IBM Plex Mono','Fira Code','Courier New',monospace", minHeight: "100vh", background: C.bg, color: C.text, display: "flex", flexDirection: "column" }}>
       <style>{`
@@ -943,21 +1067,19 @@ function SSQTracker({ supabase, session }) {
 
       {/* ── TOP NAV */}
       <div style={{ height: 50, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "stretch", padding: "0 20px", flexShrink: 0 }}>
-        {/* Brand */}
         <div style={{ display: "flex", alignItems: "center", gap: 10, paddingRight: 20, borderRight: `1px solid ${C.border}`, marginRight: 4 }}>
           <div style={{ width: 7, height: 7, borderRadius: "50%", background: activeStage.color, animation: "blink 2s infinite" }} />
           <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 3, color: C.textHi }}>SSQ</span>
           <span style={{ fontSize: 9, color: "#2a2a2a", letterSpacing: 1 }}>WEEK 1</span>
         </div>
 
-        {/* Tabs */}
         {[
-          { id: "today", label: "TODAY" },
+          { id: "today",      label: "TODAY" },
           { id: "hypothesis", label: "HYPOTHESIS" },
-          { id: "outreach", label: "OUTREACH", hidden: activeIdx < 2 },
+          { id: "outreach",   label: "OUTREACH",   hidden: activeIdx < 2 },
           { id: "scoreboard", label: "SCOREBOARD", hidden: activeIdx < 2 },
-          { id: "decision", label: "DECISION", hidden: activeIdx < 7 || st.day < 7 },
-          { id: "history", label: "HISTORY", hidden: st.day < 7 },
+          { id: "decision",   label: "DECISION",   hidden: activeIdx < 7 || st.day < 7 },
+          { id: "history",    label: "HISTORY",    hidden: st.day < 7 },
         ].filter(t => !t.hidden).map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             background: "none", border: "none",
@@ -968,8 +1090,8 @@ function SSQTracker({ supabase, session }) {
           }}>{t.label}</button>
         ))}
 
-        {/* Right info */}
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 16 }}>
+          {/* CONDITION 18: hotLeaks.length > 0 → leak badge in nav */}
           {hotLeaks.length > 0 && (
             <div style={{ display: "flex", gap: 6, alignItems: "center", padding: "3px 10px", background: "#1a0c0a", border: "1px solid #F0644944", borderRadius: 3 }}>
               <div style={{ width: 5, height: 5, borderRadius: "50%", background: "#F06449", animation: "blink 1.5s infinite" }} />
@@ -983,8 +1105,6 @@ function SSQTracker({ supabase, session }) {
             </div>
             <span style={{ fontSize: 10, fontWeight: 700, color: activeStage.color }}>{weekPct}%</span>
           </div>
-
-          {/* Save status indicator */}
           <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <div style={{
               width: 5, height: 5, borderRadius: "50%",
@@ -996,43 +1116,57 @@ function SSQTracker({ supabase, session }) {
               {saveIndicator === "saved" ? "SAVED" : saveIndicator === "saving" ? "SAVING..." : "UNSAVED"}
             </span>
           </div>
+          {/* Reset button — sets startDate to today (Day 1) and wipes all progress */}
+          <button
+            onClick={() => {
+              if (window.confirm("Reset to Day 1? This will clear all tasks, metrics, and hypothesis data.")) {
+                resetToDay1();
+              }
+            }}
+            style={{
+              fontSize: 9, letterSpacing: 2, padding: "3px 9px", borderRadius: 3,
+              border: "1px solid #2a2a2a", background: "transparent",
+              color: "#444", textTransform: "uppercase",
+              transition: "border-color .15s, color .15s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = "#F06449"; e.currentTarget.style.color = "#F06449"; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = "#2a2a2a"; e.currentTarget.style.color = "#444"; }}
+          >↺ RESET</button>
         </div>
       </div>
 
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
-
-        {/* ── MAIN */}
         <div style={{ flex: 1, overflowY: "auto", padding: "26px 28px" }} className="anim">
 
-          {/* ═══ TODAY */}
+          {/* ══ CONDITION 2: tab === "today" ══ */}
           {tab === "today" && (
             <div>
-              {/* Page header */}
+
+              {/* ── PAGE HEADER ─────────────────────────────────────────────── */}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24 }}>
                 <div>
                   <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 5 }}>
                     <span style={{ fontSize: 34, fontWeight: 700, color: C.textHi, letterSpacing: -1, lineHeight: 1 }}>Day {st.day}</span>
-                    <span style={{
-                      fontSize: 9, letterSpacing: 2, fontWeight: 700, color: activeStage.color,
-                      background: activeStage.dim, border: `1px solid ${activeStage.color}44`,
-                      padding: "3px 8px", borderRadius: 2
-                    }}>{activeStage.label}</span>
+                    <span style={{ fontSize: 9, letterSpacing: 2, fontWeight: 700, color: activeStage.color, background: activeStage.dim, border: `1px solid ${activeStage.color}44`, padding: "3px 8px", borderRadius: 2 }}>{activeStage.label}</span>
                   </div>
                   <div style={{ fontSize: 12, color: activeStage.color, marginBottom: 4 }}>{activeGroup.title}</div>
                   <div style={{ fontSize: 10, color: "#444", letterSpacing: .5 }}>
                     Task group window: Day {activeGroup.startDay}{activeGroup.endDay !== activeGroup.startDay ? `–${activeGroup.endDay}` : ""}
                   </div>
-                  {activeGroup.requirements && activeGroup.requirements.length > 0 && (
+                  {/* CONDITION 7: group has requirements */}
+                  {activeGroup.requirements?.length > 0 && (
                     <div style={{ fontSize: 10, color: "#E8C547", marginTop: 4, letterSpacing: .5 }}>
                       Requirements: {activeGroup.requirements.join(", ")}
                     </div>
                   )}
+                  {/* CONDITION 8: task group is delayed */}
                   {activeGroupDelayed && (
                     <div style={{ fontSize: 10, color: "#F06449", marginTop: 4, letterSpacing: .5 }}>
                       This task group is delayed.
                     </div>
                   )}
                 </div>
+                {/* Circular progress + count */}
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ position: "relative", width: 48, height: 48, flexShrink: 0 }}>
                     <svg width={48} height={48} style={{ transform: "rotate(-90deg)" }}>
@@ -1054,27 +1188,11 @@ function SSQTracker({ supabase, session }) {
                 </div>
               </div>
 
-              {/* Warnings */}
-              {!hypLocked && st.day >= 2 && (
-                <div onClick={() => setTab("hypothesis")}
-                  style={{ padding: "10px 16px", background: "#191200", border: "1px solid #E8C54755", borderRadius: 6, marginBottom: 16, display: "flex", gap: 10, alignItems: "center", cursor: "pointer" }}>
-                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8C547", animation: "blink 1.5s infinite", flexShrink: 0 }} />
-                  <span style={{ fontSize: 11, color: "#E8C547" }}>Hypothesis not locked yet — complete it before Day 3 outreach →</span>
-                </div>
-              )}
-              {hotLeaks.map(l => (
-                <div key={l.id} style={{ padding: "9px 14px", background: C.bg2, border: `1px solid ${l.color}33`, borderRadius: 6, marginBottom: 8, display: "flex", gap: 10, alignItems: "center" }}>
-                  <span style={{ fontSize: 9, letterSpacing: 2, color: l.color, padding: "2px 6px", border: `1px solid ${l.color}44`, borderRadius: 2 }}>{l.label}</span>
-                  <span style={{ fontSize: 11, color: "#888" }}>{l.msg}</span>
-                </div>
-              ))}
-              {interactionError && (
-                <div style={{ padding: "9px 14px", background: "#1a0c0a", border: "1px solid #F0644944", borderRadius: 6, marginBottom: 10, fontSize: 11, color: "#F06449" }}>
-                  {interactionError}
-                </div>
-              )}
+              {/* ── SECTION B: TASK GROUPS ──────────────────────────────────── */}
+              {/* Always visible on the today tab — rendered first so the active  */}
+              {/* task list is immediately visible regardless of the current day.  */}
 
-              {/* Tasks */}
+              {/* Active task group card */}
               <div style={card(`${activeStage.color}22`)}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
                   <span style={lbl}>TASKS — {activeStage.label.toUpperCase()}</span>
@@ -1092,18 +1210,72 @@ function SSQTracker({ supabase, session }) {
                 />
               </div>
 
-              {/* Quick metric log for experiment days */}
-              {st.day >= 3 && (
-                <div style={card()}>
+              {/* Group navigation — linear forward-only progression */}
+              <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ fontSize: 10, color: "#444" }}>Group {activeIdx + 1} of {flatTaskGroups.length}</div>
+                <button
+                  disabled={activeIdx >= flatTaskGroups.length - 1 || groupPct(activeGroup) < 100}
+                  onClick={() => {
+                    if (groupPct(activeGroup) < 100) return;
+                    setAppState((p) => {
+                      const next = { ...p, activeTaskIndex: Math.min(activeIdx + 1, flatTaskGroups.length - 1) };
+                      scheduleAppSave.current(next);
+                      return next;
+                    });
+                  }}
+                  style={{
+                    padding: "6px 10px", fontSize: 10, letterSpacing: 2, borderRadius: 4,
+                    border: `1px solid ${groupPct(activeGroup) === 100 ? activeStage.color : "#222"}`,
+                    background: groupPct(activeGroup) === 100 ? activeStage.dim : "#0b0b0b",
+                    color: groupPct(activeGroup) === 100 ? activeStage.color : "#444",
+                    cursor: groupPct(activeGroup) === 100 ? "pointer" : "not-allowed",
+                    textTransform: "uppercase",
+                  }}
+                >Next group →</button>
+              </div>
+
+              {/* ── SECTION A: DAY-CONDITIONAL ALERTS & PANELS ──────────────── */}
+              {/* Rendered below task groups. Each component mounts / unmounts    */}
+              {/* as the current day or runtime conditions change.                */}
+
+              {/* CONDITION 3: day >= 2 && hypothesis not locked → warning banner */}
+              {!hypLocked && st.day >= 2 && (
+                <div onClick={() => setTab("hypothesis")}
+                  style={{ padding: "10px 16px", background: "#191200", border: "1px solid #E8C54755", borderRadius: 6, marginBottom: 16, marginTop: 16, display: "flex", gap: 10, alignItems: "center", cursor: "pointer" }}>
+                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#E8C547", animation: "blink 1.5s infinite", flexShrink: 0 }} />
+                  <span style={{ fontSize: 11, color: "#E8C547" }}>Hypothesis not locked yet — complete it before Day 3 outreach →</span>
+                </div>
+              )}
+
+              {/* CONDITION 4: active leaks detected → one warning row per leak */}
+              {hotLeaks.map((l) => (
+                <div key={l.id} style={{ padding: "9px 14px", background: C.bg2, border: `1px solid ${l.color}33`, borderRadius: 6, marginBottom: 8, marginTop: 8, display: "flex", gap: 10, alignItems: "center" }}>
+                  <span style={{ fontSize: 9, letterSpacing: 2, color: l.color, padding: "2px 6px", border: `1px solid ${l.color}44`, borderRadius: 2 }}>{l.label}</span>
+                  <span style={{ fontSize: 11, color: "#888" }}>{l.msg}</span>
+                </div>
+              ))}
+
+              {/* CONDITION 5: interaction error → red error banner */}
+              {interactionError && (
+                <div style={{ padding: "9px 14px", background: "#1a0c0a", border: "1px solid #F0644944", borderRadius: 6, marginBottom: 10, marginTop: 8, fontSize: 11, color: "#F06449" }}>
+                  {interactionError}
+                </div>
+              )}
+
+              {/* CONDITION 6 (days 2–6): metric log card — appears from Day 2 when outreach  */}
+              {/* begins, and disappears on Day 7 (Decision Day) to keep the focus on verdict. */}
+              {/* Day 1 is hypothesis-only so no numbers to log yet.                          */}
+              {st.day >= 2 && st.day <= 6 && (
+                <div style={{ ...card(), marginTop: 16 }}>
                   <span style={lbl}>LOG TODAY'S NUMBERS</span>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10 }}>
-                    {METRIC_FIELDS.map(f => (
+                    {METRIC_FIELDS.map((f) => (
                       <div key={f.key}>
                         <div style={{ fontSize: 9, color: C.textDim, letterSpacing: 2, marginBottom: 6 }}>{f.label.toUpperCase()}</div>
                         <div style={{ position: "relative" }}>
                           {f.currency && <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "#444", fontSize: 11 }}>$</span>}
                           <input type="number" min="0" value={st.metrics[st.day][f.key]}
-                            onChange={e => setM(st.day, f.key, e.target.value)}
+                            onChange={(e) => setM(st.day, f.key, e.target.value)}
                             style={{ ...input, paddingLeft: f.currency ? 20 : 11 }} />
                         </div>
                       </div>
@@ -1112,40 +1284,10 @@ function SSQTracker({ supabase, session }) {
                 </div>
               )}
 
-              {/* Task group navigation (linear access only) */}
-              <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div style={{ fontSize: 10, color: "#444" }}>
-                  Group {activeIdx + 1} of {flatTaskGroups.length}
-                </div>
-                <button
-                  disabled={activeIdx >= flatTaskGroups.length - 1 || groupPct(activeGroup) < 100}
-                  onClick={() => {
-                    if (groupPct(activeGroup) < 100) return;
-                    setSt(p => {
-                      const next = { ...p, activeTaskIndex: Math.min(activeIdx + 1, flatTaskGroups.length - 1) };
-                      scheduleSave.current(next);
-                      return next;
-                    });
-                  }}
-                  style={{
-                    padding: "6px 10px",
-                    fontSize: 10,
-                    letterSpacing: 2,
-                    borderRadius: 4,
-                    border: `1px solid ${groupPct(activeGroup) === 100 ? activeStage.color : "#222"}`,
-                    background: groupPct(activeGroup) === 100 ? activeStage.dim : "#0b0b0b",
-                    color: groupPct(activeGroup) === 100 ? activeStage.color : "#444",
-                    cursor: groupPct(activeGroup) === 100 ? "pointer" : "not-allowed",
-                    textTransform: "uppercase",
-                  }}
-                >
-                  Next group →
-                </button>
-              </div>
             </div>
           )}
 
-          {/* ═══ HYPOTHESIS */}
+          {/* ══ CONDITION 9: tab === "hypothesis" ══ */}
           {tab === "hypothesis" && (
             <div>
               <div style={{ marginBottom: 26 }}>
@@ -1158,16 +1300,16 @@ function SSQTracker({ supabase, session }) {
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
                 {[
-                  { key: "who", label: "WHO — Target Audience", ph: "e.g. Roofing company owners in Vancouver, 2–10 employees" },
-                  { key: "price", label: "PRICE — Single Committed Number", ph: "e.g. $1,500 setup + $300/month" },
-                  { key: "pain", label: "PAIN — What They Feel Every Day", ph: "e.g. Missing 40% of leads because follow-up is manual and slow" },
+                  { key: "who",     label: "WHO — Target Audience",         ph: "e.g. Roofing company owners in Vancouver, 2–10 employees" },
+                  { key: "price",   label: "PRICE — Single Committed Number", ph: "e.g. $1,500 setup + $300/month" },
+                  { key: "pain",    label: "PAIN — What They Feel Every Day", ph: "e.g. Missing 40% of leads because follow-up is manual and slow" },
                   { key: "outcome", label: "OUTCOME — Measurable in 7 Days", ph: "e.g. Automated follow-up fires in 90s, books 3+ more estimates/week" },
-                ].map(f => (
+                ].map((f) => (
                   <div key={f.key} style={card()}>
                     <label style={lbl}>{f.label}</label>
                     <textarea style={tarea} placeholder={f.ph}
                       value={st.hyp[f.key]}
-                      onChange={e => upd({ hyp: { ...st.hyp, [f.key]: e.target.value } })} />
+                      onChange={(e) => upd({ hyp: { ...st.hyp, [f.key]: e.target.value } })} />
                   </div>
                 ))}
               </div>
@@ -1176,10 +1318,9 @@ function SSQTracker({ supabase, session }) {
                 <label style={lbl}>CHANNEL — How You Will Reach Them</label>
                 <input style={input} placeholder="e.g. Cold email via Instantly + LinkedIn DMs"
                   value={st.hyp.channel}
-                  onChange={e => upd({ hyp: { ...st.hyp, channel: e.target.value } })} />
+                  onChange={(e) => upd({ hyp: { ...st.hyp, channel: e.target.value } })} />
               </div>
 
-              {/* Assembled hypothesis */}
               <div style={{ background: "#090909", border: `1px solid ${hypLocked ? "#E8C54733" : C.border}`, borderRadius: 6, padding: "20px 22px" }}>
                 <span style={{ ...lbl, color: hypLocked ? "#E8C547" : C.textDim }}>YOUR LOCKED HYPOTHESIS</span>
                 <p style={{ fontSize: 14, lineHeight: 2.1, color: C.text }}>
@@ -1198,6 +1339,7 @@ function SSQTracker({ supabase, session }) {
                     Frozen from Day 2 through Day 6. You may change exactly ONE variable on Decision Day (Day 7). Changing mid-experiment means your data is worthless.
                   </span>
                 </div>
+                {/* CONDITION 10: hypLocked → locked status row */}
                 {hypLocked && (
                   <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
                     <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#52D68A" }} />
@@ -1208,19 +1350,17 @@ function SSQTracker({ supabase, session }) {
             </div>
           )}
 
-          {/* ═══ OUTREACH */}
+          {/* ══ CONDITION 11: tab === "outreach" ══ */}
           {tab === "outreach" && (
             <div>
               <div style={{ marginBottom: 26 }}>
                 <div style={{ fontSize: 30, fontWeight: 700, color: C.textHi, letterSpacing: -0.5, marginBottom: 6, lineHeight: 1 }}>Outreach</div>
-                <div style={{ fontSize: 11, color: C.textDim, lineHeight: 1.8 }}>
-                  No content right now.
-                </div>
+                <div style={{ fontSize: 11, color: C.textDim, lineHeight: 1.8 }}>No content right now.</div>
               </div>
             </div>
           )}
 
-          {/* ═══ SCOREBOARD */}
+          {/* ══ CONDITION 12: tab === "scoreboard" ══ */}
           {tab === "scoreboard" && (
             <div>
               <div style={{ marginBottom: 26 }}>
@@ -1228,15 +1368,14 @@ function SSQTracker({ supabase, session }) {
                 <div style={{ fontSize: 11, color: C.textDim }}>Feelings are not data. Log every outreach day. Numbers show you exactly where the leak is.</div>
               </div>
 
-              {/* Summary stat cards */}
               <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, marginBottom: 22 }}>
                 {[
-                  { l: "ATTEMPTS", v: totAtt, sub: `Target: 70+`, ok: totAtt >= 70 },
-                  { l: "REPLIES", v: totRep, sub: repRate ? `${repRate}% · target ≥1%` : "target ≥1%", ok: parseFloat(repRate) >= 1 },
-                  { l: "SHOWS", v: totShow, sub: showRate ? `${showRate}% of replies` : "target ≥10%", ok: parseFloat(showRate) >= 10 },
-                  { l: "CLOSES", v: totClose, sub: "target > 0", ok: totClose > 0 },
-                  { l: "REVENUE", v: `$${totRev}`, sub: "target > $0", ok: totRev > 0 },
-                ].map(s => (
+                  { l: "ATTEMPTS", v: totAtt,          sub: `Target: 70+`,                              ok: totAtt >= 70 },
+                  { l: "REPLIES",  v: totRep,           sub: repRate ? `${repRate}% · target ≥1%` : "target ≥1%", ok: parseFloat(repRate) >= 1 },
+                  { l: "SHOWS",    v: totShow,          sub: showRate ? `${showRate}% of replies` : "target ≥10%", ok: parseFloat(showRate) >= 10 },
+                  { l: "CLOSES",   v: totClose,         sub: "target > 0",                               ok: totClose > 0 },
+                  { l: "REVENUE",  v: `$${totRev}`,     sub: "target > $0",                              ok: totRev > 0 },
+                ].map((s) => (
                   <div key={s.l} style={{ ...card(s.ok ? "#52D68A22" : undefined), textAlign: "center", marginBottom: 0 }}>
                     <div style={{ fontSize: 8, letterSpacing: 3, color: s.ok ? "#52D68A77" : "#333", marginBottom: 10 }}>{s.l}</div>
                     <div style={{ fontSize: 30, fontWeight: 700, color: s.ok ? "#52D68A" : "#555", lineHeight: 1, marginBottom: 8 }}>{s.v}</div>
@@ -1245,44 +1384,39 @@ function SSQTracker({ supabase, session }) {
                 ))}
               </div>
 
-              {/* Table */}
               <div style={card()}>
                 <span style={lbl}>DAY-BY-DAY</span>
                 <div style={{ overflowX: "auto" }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 540 }}>
                     <thead>
                       <tr>
-                        {["DAY", "STAGE", "ATTEMPTS", "REPLIES", "SHOWS", "CLOSES"].map(h => (
-                          <th key={h} style={{ padding: "6px 10px", textAlign: h === "DAY" || h === "PHASE" ? "left" : "right", fontSize: 8, letterSpacing: 2, color: "#2a2a2a", borderBottom: `1px solid ${C.border}` }}>{h}</th>
+                        {["DAY", "STAGE", "ATTEMPTS", "REPLIES", "SHOWS", "CLOSES"].map((h) => (
+                          <th key={h} style={{ padding: "6px 10px", textAlign: h === "DAY" || h === "STAGE" ? "left" : "right", fontSize: 8, letterSpacing: 2, color: "#2a2a2a", borderBottom: `1px solid ${C.border}` }}>{h}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody>
-                      {[2, 3, 4, 5, 6].map(d => {
+                      {[2, 3, 4, 5, 6].map((d) => {
                         const dp = stageForDay(d);
                         const active = d === st.day;
                         const isOut = d >= 3;
                         return (
-                          <tr key={d} style={{ background: active ? "#0f0f0f" : "transparent", cursor: "pointer" }} onClick={() => upd({ day: d })}>
+                          <tr key={d} style={{ background: active ? "#0f0f0f" : "transparent" }}>
                             <td style={{ padding: "7px 10px", fontSize: 12, fontWeight: 700, color: active ? dp.color : "#3a3a3a", borderBottom: `1px solid ${C.border}` }}>
                               {active ? "▶ " : "  "}{d}
                             </td>
                             <td style={{ padding: "7px 10px", borderBottom: `1px solid ${C.border}` }}>
-                              <span style={{
-                                fontSize: 8, letterSpacing: 2, fontWeight: 700, color: dp.color,
-                                background: dp.dim, border: `1px solid ${dp.color}44`,
-                                padding: "2px 5px", borderRadius: 2
-                              }}>{dp.label.toUpperCase()}</span>
+                              <span style={{ fontSize: 8, letterSpacing: 2, fontWeight: 700, color: dp.color, background: dp.dim, border: `1px solid ${dp.color}44`, padding: "2px 5px", borderRadius: 2 }}>{dp.label.toUpperCase()}</span>
                             </td>
-                            {METRIC_FIELDS.map(f => (
+                            {METRIC_FIELDS.map((f) => (
                               <td key={f.key} style={{ padding: "4px 10px", textAlign: "right", borderBottom: `1px solid ${C.border}` }}>
                                 {!isOut && f.key !== "attempts" && f.key !== "revenue"
                                   ? <span style={{ color: "#1e1e1e", fontSize: 11 }}>—</span>
                                   : (
-                                    <div onClick={e => e.stopPropagation()} style={{ position: "relative" }}>
+                                    <div style={{ position: "relative" }}>
                                       {f.currency && <span style={{ position: "absolute", left: 8, top: "50%", transform: "translateY(-50%)", color: "#333", fontSize: 10 }}>$</span>}
                                       <input type="number" min="0" value={st.metrics[d][f.key]}
-                                        onChange={e => setM(d, f.key, e.target.value)}
+                                        onChange={(e) => setM(d, f.key, e.target.value)}
                                         style={{ ...input, width: 70, padding: f.currency ? "5px 8px 5px 18px" : "5px 8px", textAlign: "right", fontSize: 12 }} />
                                     </div>
                                   )}
@@ -1293,7 +1427,7 @@ function SSQTracker({ supabase, session }) {
                       })}
                       <tr style={{ background: "#050505" }}>
                         <td colSpan={2} style={{ padding: "9px 10px", fontSize: 8, letterSpacing: 2, color: "#2a2a2a" }}>TOTAL</td>
-                        {METRIC_FIELDS.map(f => (
+                        {METRIC_FIELDS.map((f) => (
                           <td key={f.key} style={{ padding: "9px 10px", textAlign: "right", fontSize: 16, fontWeight: 700, color: "#666" }}>
                             {f.key === "attempts" ? totAtt : f.key === "replies" ? totRep : f.key === "shows" ? totShow : f.key === "closes" ? totClose : `$${totRev}`}
                           </td>
@@ -1304,9 +1438,8 @@ function SSQTracker({ supabase, session }) {
                 </div>
               </div>
 
-              {/* Leak grid */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 4 }}>
-                {leaks.map(l => (
+                {leaks.map((l) => (
                   <div key={l.id} style={{ ...card(l.active ? `${l.color}33` : undefined), marginBottom: 0, opacity: l.active ? 1 : 0.3 }}>
                     <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
                       <div style={{ width: 6, height: 6, borderRadius: "50%", background: l.active ? l.color : "#1e1e1e", flexShrink: 0 }} />
@@ -1320,17 +1453,17 @@ function SSQTracker({ supabase, session }) {
             </div>
           )}
 
-          {/* ═══ DECISION */}
+          {/* ══ CONDITION 13: tab === "decision" ══ */}
           {tab === "decision" && (
             <div>
               <div style={{ marginBottom: 26 }}>
                 <div style={{ fontSize: 30, fontWeight: 700, color: C.textHi, letterSpacing: -0.5, marginBottom: 6, lineHeight: 1 }}>Decision Day</div>
                 <div style={{ fontSize: 11, color: C.textDim, lineHeight: 1.8 }}>
-                  Day 7 only. Read numbers, not feelings.<br />
-                  One verdict. One change maximum. Lock Week 2.
+                  Day 7 only. Read numbers, not feelings.<br />One verdict. One change maximum. Lock Week 2.
                 </div>
               </div>
 
+              {/* CONDITION 14: day < 7 → early warning */}
               {st.day < 7 && (
                 <div style={{ padding: "11px 16px", background: C.bg2, border: "1px solid #F0644933", borderRadius: 6, marginBottom: 22, display: "flex", gap: 10, alignItems: "center" }}>
                   <span style={{ color: "#F06449" }}>⚠</span>
@@ -1338,15 +1471,14 @@ function SSQTracker({ supabase, session }) {
                 </div>
               )}
 
-              {/* Summary */}
               <div style={{ ...card(), marginBottom: 18 }}>
                 <span style={lbl}>WEEK SUMMARY</span>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 0 }}>
                   {[
-                    { l: "Attempts", v: totAtt, bench: "≥70", ok: totAtt >= 70 },
+                    { l: "Attempts",   v: totAtt,              bench: "≥70", ok: totAtt >= 70 },
                     { l: "Reply Rate", v: `${repRate ?? "—"}%`, bench: "≥1%", ok: parseFloat(repRate) >= 1 },
-                    { l: "Show Rate", v: `${showRate ?? "—"}%`, bench: "≥10%", ok: parseFloat(showRate) >= 10 },
-                    { l: "Revenue", v: `$${totRev}`, bench: ">$0", ok: totRev > 0 },
+                    { l: "Show Rate",  v: `${showRate ?? "—"}%`, bench: "≥10%", ok: parseFloat(showRate) >= 10 },
+                    { l: "Revenue",    v: `$${totRev}`,          bench: ">$0",  ok: totRev > 0 },
                   ].map((r, i) => (
                     <div key={r.l} style={{ textAlign: "center", padding: "14px 8px", borderRight: i < 3 ? `1px solid ${C.border}` : "none" }}>
                       <div style={{ fontSize: 8, letterSpacing: 2, color: "#3a3a3a", marginBottom: 8 }}>{r.l.toUpperCase()}</div>
@@ -1357,30 +1489,28 @@ function SSQTracker({ supabase, session }) {
                 </div>
               </div>
 
-              {/* Leak sentence */}
               <div style={{ ...card(), marginBottom: 18 }}>
                 <label style={lbl}>THE MARKET TOLD ME —</label>
                 <div style={{ fontSize: 10, color: "#444", marginBottom: 10, lineHeight: 1.7 }}>Finish the sentence with one specific data-backed observation. No feelings.</div>
                 <textarea style={tarea}
                   placeholder='e.g. "72 attempts, 0.4% reply rate — my first line is about me, not their pain. Message is the leak."'
                   value={st.leak}
-                  onChange={e => upd({ leak: e.target.value })} />
+                  onChange={(e) => upd({ leak: e.target.value })} />
               </div>
 
-              {/* Verdict */}
               <div style={{ ...card(), marginBottom: 18 }}>
                 <span style={lbl}>VERDICT</span>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 16 }}>
                   {[
-                    { id: "scale", label: "SCALE", sub: "Signal exists. Increase volume.", color: "#52D68A", dim: "#081a0f" },
+                    { id: "scale", label: "SCALE", sub: "Signal exists. Increase volume.",        color: "#52D68A", dim: "#081a0f" },
                     { id: "pivot", label: "PIVOT", sub: "One thing is broken. Change it. Re-run.", color: "#E8C547", dim: "#191200" },
-                    { id: "kill", label: "KILL", sub: "Wrong market or wrong service. Start fresh.", color: "#F06449", dim: "#1a0c0a" },
-                  ].map(v => (
+                    { id: "kill",  label: "KILL",  sub: "Wrong market or wrong service. Start fresh.", color: "#F06449", dim: "#1a0c0a" },
+                  ].map((v) => (
                     <button key={v.id} onClick={() => upd({ verdict: v.id })}
                       style={{
                         background: st.verdict === v.id ? v.dim : "transparent",
                         border: `1.5px solid ${st.verdict === v.id ? v.color : "#1e1e1e"}`,
-                        borderRadius: 6, padding: "16px 12px", textAlign: "center", transition: "all .15s"
+                        borderRadius: 6, padding: "16px 12px", textAlign: "center", transition: "all .15s",
                       }}>
                       <div style={{ fontSize: 18, fontWeight: 700, color: st.verdict === v.id ? v.color : "#333", letterSpacing: 2, marginBottom: 8 }}>{v.label}</div>
                       <div style={{ fontSize: 10, color: st.verdict === v.id ? "#666" : "#2a2a2a", lineHeight: 1.5 }}>{v.sub}</div>
@@ -1388,17 +1518,19 @@ function SSQTracker({ supabase, session }) {
                   ))}
                 </div>
 
+                {/* CONDITION 15: verdict === "pivot" → pivot variable selector */}
                 {st.verdict === "pivot" && (
                   <div style={{ padding: "14px 16px", background: "#191200", border: "1px solid #E8C54744", borderRadius: 6, marginBottom: 8 }}>
                     <span style={{ ...lbl, color: "#E8C547" }}>CHANGE EXACTLY ONE VARIABLE</span>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-                      {["Message", "Targeting (WHO)", "Price", "Channel", "CTA / Offer page"].map(v => (
+                      {["Message", "Targeting (WHO)", "Price", "Channel", "CTA / Offer page"].map((v) => (
                         <button key={v} onClick={() => upd({ pivotVar: st.pivotVar === v ? "" : v })}
                           style={{
-                            padding: "5px 11px", border: `1px solid ${st.pivotVar === v ? "#E8C547" : "#2a2a2a"}`,
+                            padding: "5px 11px",
+                            border: `1px solid ${st.pivotVar === v ? "#E8C547" : "#2a2a2a"}`,
                             background: st.pivotVar === v ? "#1a1500" : "transparent",
                             color: st.pivotVar === v ? "#E8C547" : "#444",
-                            borderRadius: 3, fontSize: 10, letterSpacing: 1, transition: "all .15s"
+                            borderRadius: 3, fontSize: 10, letterSpacing: 1, transition: "all .15s",
                           }}>{v}</button>
                       ))}
                     </div>
@@ -1406,11 +1538,12 @@ function SSQTracker({ supabase, session }) {
                   </div>
                 )}
 
+                {/* CONDITION 16: verdict === "scale" → scale protocol block */}
                 {st.verdict === "scale" && (
                   <div style={{ padding: "14px 16px", background: "#081a0f", border: "1px solid #52D68A44", borderRadius: 6 }}>
                     <span style={{ ...lbl, color: "#52D68A" }}>SCALE PROTOCOL</span>
-                    {["Keep exact same message", "Keep exact same niche", "Increase to 15+ attempts/day in Week 2", "Add a second channel only after 15/day is consistent"].map(a => (
-                      <div key={a} style={{ padding: "5px 0", borderBottom: `1px solid #0e2a18`, fontSize: 11, color: "#52D68A88", display: "flex", gap: 8 }}>
+                    {["Keep exact same message", "Keep exact same niche", "Increase to 15+ attempts/day in Week 2", "Add a second channel only after 15/day is consistent"].map((a) => (
+                      <div key={a} style={{ padding: "5px 0", borderBottom: "1px solid #0e2a18", fontSize: 11, color: "#52D68A88", display: "flex", gap: 8 }}>
                         <span style={{ color: "#52D68A" }}>✓</span>{a}
                       </div>
                     ))}
@@ -1418,7 +1551,6 @@ function SSQTracker({ supabase, session }) {
                 )}
               </div>
 
-              {/* Week 2 hypothesis */}
               <div style={card()}>
                 <label style={lbl}>WEEK 2 — LOCKED HYPOTHESIS</label>
                 <div style={{ fontSize: 10, color: "#444", marginBottom: 10, lineHeight: 1.7 }}>
@@ -1427,12 +1559,12 @@ function SSQTracker({ supabase, session }) {
                 <textarea style={{ ...tarea, minHeight: 80 }}
                   placeholder='e.g. "I believe HVAC owners in Toronto will pay $2,000 setup + $400/month to automate missed-call follow-up because they lose 30% of inbound leads to faster competitors."'
                   value={st.w2hyp}
-                  onChange={e => upd({ w2hyp: e.target.value })} />
+                  onChange={(e) => upd({ w2hyp: e.target.value })} />
               </div>
             </div>
           )}
 
-          {/* ═══ HISTORY */}
+          {/* ══ CONDITION 17: tab === "history" ══ */}
           {tab === "history" && (
             <div>
               <div style={{ marginBottom: 26 }}>
@@ -1448,18 +1580,14 @@ function SSQTracker({ supabase, session }) {
                     <div>
                       <span style={{ ...lbl, marginBottom: 4 }}>{entry.stage.label.toUpperCase()} — {entry.group.title}</span>
                       <div style={{ fontSize: 10, color: "#666" }}>Task group window: Day {entry.group.startDay}{entry.group.endDay !== entry.group.startDay ? `–${entry.group.endDay}` : ""}</div>
-                      {entry.group.requirements && entry.group.requirements.length > 0 && (
+                      {entry.group.requirements?.length > 0 && (
                         <div style={{ fontSize: 10, color: "#E8C547", marginTop: 4 }}>
                           Requirements: {entry.group.requirements.join(", ")}
                         </div>
                       )}
                     </div>
                   </div>
-                  <HistoryList
-                    todos={entry.group.todos || []}
-                    isDone={isTodoDone}
-                    C={C}
-                  />
+                  <HistoryList todos={entry.group.todos || []} isDone={isTodoDone} C={C} />
                 </div>
               ))}
             </div>
