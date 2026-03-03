@@ -167,17 +167,38 @@ const TASK_STAGES = [
         startDay: 1,
         endDay: 1,
         todos: [
-          { id: "hypo-who", label: "Define WHO — industry + role + location in one sentence", isGroup: false, minutes: 20 },
-          { id: "hypo-pain", label: "Define PAIN — what frustrates them every single day?", isGroup: false, minutes: 20 },
-          { id: "hypo-outcome", label: "Define OUTCOME — what is measurably different after 7 days?", isGroup: false, minutes: 20 },
           {
-            id: "hypo-price-group",
-            label: "Price + final hypothesis statement",
-            isGroup: true,
-            children: [
-              { id: "hypo-price", label: "Set PRICE — commit to one number, no ranges", isGroup: false, minutes: 10 },
-              { id: "hypo-statement", label: "Write the full hypothesis statement and freeze it", isGroup: false, minutes: 15 },
-            ],
+            id: "hypo-industry",
+            label: "Choose an industry + size + location",
+            isGroup: false,
+            minutes: 20,
+            details: "Choosing an industry where you have an unfair advantage, and warm leads is recommended",
+          },
+          {
+            id: "hypo-problem",
+            label: "Choose a problem that they face everyday",
+            isGroup: false,
+            minutes: 20,
+          },
+          {
+            id: "hypo-outcome",
+            label: "Define an outcome that you are going to deliver",
+            isGroup: false,
+            minutes: 20,
+            details: "The outcome is clearly noticable under 7 days",
+          },
+          {
+            id: "hypo-solution",
+            label: "Define how you are going to provide the outcome",
+            isGroup: false,
+            minutes: 20,
+            details: "Choose a solution method that you can execute easily",
+          },
+          {
+            id: "hypo-channels",
+            label: "Choose the communication channels to reach out to them",
+            isGroup: false,
+            minutes: 15,
           },
         ],
       },
@@ -748,10 +769,10 @@ function SSQTracker({ supabase, session }) {
   const hypLocked = st.hyp.who && st.hyp.pain && st.hyp.outcome && st.hyp.price;
 
   const leaks = [
-    { id: "vol",  label: "VOLUME",   color: "#F06449", active: totAtt < 30 && st.day >= 4, msg: "Sending < 10/day. Protect your outreach block." },
-    { id: "msg",  label: "MESSAGE",  color: "#E8C547", active: totAtt >= 30 && parseFloat(repRate) < 1, msg: "Reply rate < 1%. Rewrite first 2 lines of your message." },
-    { id: "fup",  label: "FOLLOWUP", color: "#5B9CF6", active: totRep > 0 && totShow === 0, msg: "Replies exist but no calls booked. Send calendar link on first signal." },
-    { id: "call", label: "CALL",     color: "#52D68A", active: totShow > 0 && totClose === 0, msg: "Calls happening but no close. Tighten your call structure." },
+    { id: "vol", label: "VOLUME", color: "#F06449", active: totAtt < 30 && st.day >= 4, msg: "Sending < 10/day. Protect your outreach block." },
+    { id: "msg", label: "MESSAGE", color: "#E8C547", active: totAtt >= 30 && parseFloat(repRate) < 1, msg: "Reply rate < 1%. Rewrite first 2 lines of your message." },
+    { id: "fup", label: "FOLLOWUP", color: "#5B9CF6", active: totRep > 0 && totShow === 0, msg: "Replies exist but no calls booked. Send calendar link on first signal." },
+    { id: "call", label: "CALL", color: "#52D68A", active: totShow > 0 && totClose === 0, msg: "Calls happening but no close. Tighten your call structure." },
   ];
   const hotLeaks = leaks.filter((l) => l.active);
 
@@ -832,6 +853,7 @@ function SSQTracker({ supabase, session }) {
           const explicitLock = !isGroup ? row : null;
           const leafLockedByEmail = !isGroup ? (explicitLock?.locked_by || inheritedLockEmail) : null;
           const leafLocked = !!leafLockedByEmail;
+          const locked = leafLocked; // Alias for consistency with provided snippet
           const leafLockedAt = explicitLock?.locked_at || null;
           const isLeafLockedByMe = leafLocked && leafLockedByEmail === myEmail;
           const isLeafLockedByOther = leafLocked && leafLockedByEmail !== myEmail;
@@ -940,9 +962,25 @@ function SSQTracker({ supabase, session }) {
                   </div>
 
                   {/* CONDITION 21: leaf locked with lockedAt → countdown timer */}
-                  {!isGroup && leafLockedAt && remainingMs != null && (
+                  {locked && remainingMs != null && (
                     <div style={{ marginTop: 4, fontSize: 10, color: remainingMs === 0 ? "#F06449" : accentColor }}>
-                      {remainingMs === 0 ? "Deadline passed" : `Time left: ${remainingMin}m ${String(remainingSec).padStart(2, "0")}s`}
+                      {remainingMs === 0 ? "Deadline passed" : `Time left: ${remainingMin}m ${remainingSec.toString().padStart(2, "0")}s`}
+                    </div>
+                  )}
+
+                  {/* Details box — shown when task is started (locked) */}
+                  {locked && !done && todo.details && (
+                    <div style={{
+                      marginTop: 8,
+                      padding: "8px 12px",
+                      border: "1px solid #E8C547",
+                      borderRadius: 4,
+                      fontSize: 11,
+                      color: "#E8C547",
+                      lineHeight: 1.6,
+                      background: "#1a150044",
+                    }}>
+                      {todo.details}
                     </div>
                   )}
 
@@ -999,7 +1037,7 @@ function SSQTracker({ supabase, session }) {
           let dayCompleted = null;
           if (completedAt) dayCompleted = Math.floor((completedAt - startAtMidnight.getTime()) / 86400000) + 1;
           const durMin = row.duration_ms ? Math.floor(row.duration_ms / 60000) : 0;
-          const durSec  = row.duration_ms ? Math.floor((row.duration_ms % 60000) / 1000) : 0;
+          const durSec = row.duration_ms ? Math.floor((row.duration_ms % 60000) / 1000) : 0;
           const formattedDuration = `${durMin}m ${durSec}s`;
 
           return (
@@ -1074,12 +1112,12 @@ function SSQTracker({ supabase, session }) {
         </div>
 
         {[
-          { id: "today",      label: "TODAY" },
+          { id: "today", label: "TODAY" },
           { id: "hypothesis", label: "HYPOTHESIS" },
-          { id: "outreach",   label: "OUTREACH",   hidden: activeIdx < 2 },
+          { id: "outreach", label: "OUTREACH", hidden: activeIdx < 2 },
           { id: "scoreboard", label: "SCOREBOARD", hidden: activeIdx < 2 },
-          { id: "decision",   label: "DECISION",   hidden: activeIdx < 7 || st.day < 7 },
-          { id: "history",    label: "HISTORY",    hidden: st.day < 7 },
+          { id: "decision", label: "DECISION", hidden: activeIdx < 7 || st.day < 7 },
+          { id: "history", label: "HISTORY", hidden: st.day < 7 },
         ].filter(t => !t.hidden).map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             background: "none", border: "none",
@@ -1300,9 +1338,9 @@ function SSQTracker({ supabase, session }) {
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
                 {[
-                  { key: "who",     label: "WHO — Target Audience",         ph: "e.g. Roofing company owners in Vancouver, 2–10 employees" },
-                  { key: "price",   label: "PRICE — Single Committed Number", ph: "e.g. $1,500 setup + $300/month" },
-                  { key: "pain",    label: "PAIN — What They Feel Every Day", ph: "e.g. Missing 40% of leads because follow-up is manual and slow" },
+                  { key: "who", label: "WHO — Target Audience", ph: "e.g. Roofing company owners in Vancouver, 2–10 employees" },
+                  { key: "price", label: "PRICE — Single Committed Number", ph: "e.g. $1,500 setup + $300/month" },
+                  { key: "pain", label: "PAIN — What They Feel Every Day", ph: "e.g. Missing 40% of leads because follow-up is manual and slow" },
                   { key: "outcome", label: "OUTCOME — Measurable in 7 Days", ph: "e.g. Automated follow-up fires in 90s, books 3+ more estimates/week" },
                 ].map((f) => (
                   <div key={f.key} style={card()}>
@@ -1370,11 +1408,11 @@ function SSQTracker({ supabase, session }) {
 
               <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 10, marginBottom: 22 }}>
                 {[
-                  { l: "ATTEMPTS", v: totAtt,          sub: `Target: 70+`,                              ok: totAtt >= 70 },
-                  { l: "REPLIES",  v: totRep,           sub: repRate ? `${repRate}% · target ≥1%` : "target ≥1%", ok: parseFloat(repRate) >= 1 },
-                  { l: "SHOWS",    v: totShow,          sub: showRate ? `${showRate}% of replies` : "target ≥10%", ok: parseFloat(showRate) >= 10 },
-                  { l: "CLOSES",   v: totClose,         sub: "target > 0",                               ok: totClose > 0 },
-                  { l: "REVENUE",  v: `$${totRev}`,     sub: "target > $0",                              ok: totRev > 0 },
+                  { l: "ATTEMPTS", v: totAtt, sub: `Target: 70+`, ok: totAtt >= 70 },
+                  { l: "REPLIES", v: totRep, sub: repRate ? `${repRate}% · target ≥1%` : "target ≥1%", ok: parseFloat(repRate) >= 1 },
+                  { l: "SHOWS", v: totShow, sub: showRate ? `${showRate}% of replies` : "target ≥10%", ok: parseFloat(showRate) >= 10 },
+                  { l: "CLOSES", v: totClose, sub: "target > 0", ok: totClose > 0 },
+                  { l: "REVENUE", v: `$${totRev}`, sub: "target > $0", ok: totRev > 0 },
                 ].map((s) => (
                   <div key={s.l} style={{ ...card(s.ok ? "#52D68A22" : undefined), textAlign: "center", marginBottom: 0 }}>
                     <div style={{ fontSize: 8, letterSpacing: 3, color: s.ok ? "#52D68A77" : "#333", marginBottom: 10 }}>{s.l}</div>
@@ -1475,10 +1513,10 @@ function SSQTracker({ supabase, session }) {
                 <span style={lbl}>WEEK SUMMARY</span>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 0 }}>
                   {[
-                    { l: "Attempts",   v: totAtt,              bench: "≥70", ok: totAtt >= 70 },
+                    { l: "Attempts", v: totAtt, bench: "≥70", ok: totAtt >= 70 },
                     { l: "Reply Rate", v: `${repRate ?? "—"}%`, bench: "≥1%", ok: parseFloat(repRate) >= 1 },
-                    { l: "Show Rate",  v: `${showRate ?? "—"}%`, bench: "≥10%", ok: parseFloat(showRate) >= 10 },
-                    { l: "Revenue",    v: `$${totRev}`,          bench: ">$0",  ok: totRev > 0 },
+                    { l: "Show Rate", v: `${showRate ?? "—"}%`, bench: "≥10%", ok: parseFloat(showRate) >= 10 },
+                    { l: "Revenue", v: `$${totRev}`, bench: ">$0", ok: totRev > 0 },
                   ].map((r, i) => (
                     <div key={r.l} style={{ textAlign: "center", padding: "14px 8px", borderRight: i < 3 ? `1px solid ${C.border}` : "none" }}>
                       <div style={{ fontSize: 8, letterSpacing: 2, color: "#3a3a3a", marginBottom: 8 }}>{r.l.toUpperCase()}</div>
@@ -1502,9 +1540,9 @@ function SSQTracker({ supabase, session }) {
                 <span style={lbl}>VERDICT</span>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 16 }}>
                   {[
-                    { id: "scale", label: "SCALE", sub: "Signal exists. Increase volume.",        color: "#52D68A", dim: "#081a0f" },
+                    { id: "scale", label: "SCALE", sub: "Signal exists. Increase volume.", color: "#52D68A", dim: "#081a0f" },
                     { id: "pivot", label: "PIVOT", sub: "One thing is broken. Change it. Re-run.", color: "#E8C547", dim: "#191200" },
-                    { id: "kill",  label: "KILL",  sub: "Wrong market or wrong service. Start fresh.", color: "#F06449", dim: "#1a0c0a" },
+                    { id: "kill", label: "KILL", sub: "Wrong market or wrong service. Start fresh.", color: "#F06449", dim: "#1a0c0a" },
                   ].map((v) => (
                     <button key={v.id} onClick={() => upd({ verdict: v.id })}
                       style={{
